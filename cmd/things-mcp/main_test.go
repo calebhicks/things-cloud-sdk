@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestToolJSONEmptySliceSerializesAsArray(t *testing.T) {
+	// contracts.md documents every MCP list result as a JSON array. The list
+	// functions must initialize empty slices so empty results serialize as []
+	// rather than null (a nil slice marshals to null).
+	for name, v := range map[string]any{
+		"tasks":    []simpleTask{},
+		"projects": []simpleProject{},
+		"areas":    []simpleArea{},
+		"tags":     []simpleTag{},
+	} {
+		if got := toolJSON(v).Content[0].Text; got != "[]" {
+			t.Fatalf("empty %s list serialized as %q, want []", name, got)
+		}
+	}
+}
+
 func TestHandleInitialize(t *testing.T) {
 	server := &mcpServer{}
 	resp, ok := server.handle(rpcRequest{

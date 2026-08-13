@@ -520,7 +520,7 @@ func (s *mcpServer) listTasks(view, query string, limit int) (toolResult, error)
 	now := time.Now().UTC()
 	tomorrowStart := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
 
-	var tasks []simpleTask
+	tasks := []simpleTask{}
 	for _, task := range state.Tasks {
 		if task.InTrash || task.Status == thingscloud.TaskStatusCompleted || task.Type == thingscloud.TaskTypeProject {
 			continue
@@ -571,7 +571,7 @@ func (s *mcpServer) listProjects(limit int) (toolResult, error) {
 	if err != nil {
 		return toolError(err), nil
 	}
-	var projects []simpleProject
+	projects := []simpleProject{}
 	for _, task := range state.Tasks {
 		if task.Type != thingscloud.TaskTypeProject || task.InTrash || task.Status == thingscloud.TaskStatusCompleted {
 			continue
@@ -595,7 +595,7 @@ func (s *mcpServer) listAreas(limit int) (toolResult, error) {
 	if err != nil {
 		return toolError(err), nil
 	}
-	var areas []simpleArea
+	areas := []simpleArea{}
 	for _, area := range state.Areas {
 		areas = append(areas, simpleArea{UUID: area.UUID, Title: area.Title})
 	}
@@ -616,7 +616,7 @@ func (s *mcpServer) listTags(limit int) (toolResult, error) {
 	if err != nil {
 		return toolError(err), nil
 	}
-	var tags []simpleTag
+	tags := []simpleTag{}
 	for _, tag := range state.Tags {
 		tags = append(tags, simpleTag{
 			UUID:      tag.UUID,
