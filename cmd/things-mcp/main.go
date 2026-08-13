@@ -221,10 +221,15 @@ func tools() []toolDefinition {
 			Title:       "Edit Task",
 			Description: "Edit task title, note, or schedule bucket.",
 			InputSchema: objectSchema(map[string]any{
-				"uuid":    stringProp("Task UUID."),
-				"title":   stringProp("New task title."),
-				"note":    stringProp("New task note."),
-				"when":    enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
+				"uuid":  stringProp("Task UUID."),
+				"title": stringProp("New task title."),
+				"note":  stringProp("New task note."),
+				"when":  enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
+				"tags": map[string]any{
+					"type":        "array",
+					"description": "Tag UUIDs. Replaces the task's whole tag set.",
+					"items":       map[string]any{"type": "string"},
+				},
 				"dry_run": dryRunProp(),
 			}, []string{"uuid"}),
 		},
@@ -248,6 +253,11 @@ func tools() []toolDefinition {
 							"when":      enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
 							"scheduled": stringProp("Scheduled date as YYYY-MM-DD."),
 							"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
+							"tags": map[string]any{
+								"type":        "array",
+								"description": "Tag UUIDs for edit. Replaces the task's whole tag set.",
+								"items":       map[string]any{"type": "string"},
+							},
 						},
 						"required":             []string{"cmd"},
 						"additionalProperties": false,
@@ -416,16 +426,17 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 		return s.completeTask(args.UUID, args.DryRun)
 	case "edit_task":
 		var args struct {
-			UUID   string `json:"uuid"`
-			Title  string `json:"title"`
-			Note   string `json:"note"`
-			When   string `json:"when"`
-			DryRun bool   `json:"dry_run"`
+			UUID   string   `json:"uuid"`
+			Title  string   `json:"title"`
+			Note   string   `json:"note"`
+			When   string   `json:"when"`
+			Tags   []string `json:"tags"`
+			DryRun bool     `json:"dry_run"`
 		}
 		if err := decodeArgs(params.Arguments, &args); err != nil {
 			return toolResult{}, err
 		}
-		return s.editTask(args.UUID, args.Title, args.Note, args.When, args.DryRun)
+		return s.editTask(args.UUID, args.Title, args.Note, args.When, args.Tags, args.DryRun)
 	case "batch_tasks":
 		var args struct {
 			Operations []batchTaskOp `json:"operations"`
@@ -818,7 +829,7 @@ func (s *mcpServer) completeTask(taskUUID string, dryRun bool) (toolResult, erro
 	return toolJSON(map[string]string{"status": "completed", "uuid": taskUUID}), nil
 }
 
-func (s *mcpServer) editTask(taskUUID, title, note, when string, dryRun bool) (toolResult, error) {
+func (s *mcpServer) editTask(taskUUID, title, note, when string, tags []string, dryRun bool) (toolResult, error) {
 	taskUUID = strings.TrimSpace(taskUUID)
 	if taskUUID == "" {
 		return toolResult{}, fmt.Errorf("uuid is required")
@@ -838,8 +849,17 @@ func (s *mcpServer) editTask(taskUUID, title, note, when string, dryRun bool) (t
 			return toolResult{}, err
 		}
 	}
+	// Same convention as CLI edit --tags: validated tag UUIDs replace the
+	// task's whole tag set.
+	if len(tags) > 0 {
+		validated, err := validateTagUUIDs(tags)
+		if err != nil {
+			return toolResult{}, err
+		}
+		u.Tags(validated)
+	}
 	if !u.changed() {
-		return toolResult{}, fmt.Errorf("at least one of title, note, or when is required")
+		return toolResult{}, fmt.Errorf("at least one of title, note, when, or tags is required")
 	}
 	env := writeEnvelope{id: taskUUID, action: 1, kind: "Task6", payload: u.build()}
 	if dryRun {

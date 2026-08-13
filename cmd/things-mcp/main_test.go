@@ -251,7 +251,7 @@ func TestCompleteTaskDryRunDoesNotRequireCloud(t *testing.T) {
 func TestEditTaskDryRunDoesNotRequireCloud(t *testing.T) {
 	server := &mcpServer{}
 	taskUUID := thingscloud.NewUUID()
-	result, err := server.editTask(taskUUID, "New title", "new note", "anytime", true)
+	result, err := server.editTask(taskUUID, "New title", "new note", "anytime", nil, true)
 	if err != nil {
 		t.Fatalf("editTask dry-run failed: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestWriteToolsRejectNonCanonicalUUID(t *testing.T) {
 	if _, err := server.completeTask("task-1", true); err == nil {
 		t.Fatal("complete with non-canonical uuid should be rejected")
 	}
-	if _, err := server.editTask("not-a-uuid", "T", "", "", true); err == nil {
+	if _, err := server.editTask("not-a-uuid", "T", "", "", nil, true); err == nil {
 		t.Fatal("edit with non-canonical uuid should be rejected")
 	}
 	if _, err := server.trashTask("zzzzzzzzzzzzzzzzzzzzzz", true); err == nil {
@@ -301,6 +301,67 @@ func TestWriteToolsRejectNonCanonicalUUID(t *testing.T) {
 	}
 	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "create", Title: "X", UUID: "task-1"}}, true); err == nil {
 		t.Fatal("batch create with non-canonical caller uuid should be rejected")
+	}
+}
+
+func TestEditTaskTagsFollowCLIConvention(t *testing.T) {
+	server := &mcpServer{}
+	taskUUID := thingscloud.NewUUID()
+	tagOne := thingscloud.NewUUID()
+	tagTwo := thingscloud.NewUUID()
+
+	result, err := server.editTask(taskUUID, "", "", "", []string{tagOne, " " + tagTwo}, true)
+	if err != nil {
+		t.Fatalf("editTask with tags failed: %v", err)
+	}
+	var payload struct {
+		Status string `json:"status"`
+		Item   struct {
+			P struct {
+				Tg []string `json:"tg"`
+			} `json:"p"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content: %v", err)
+	}
+	if payload.Status != "dry-run" {
+		t.Fatalf("status = %q, want dry-run", payload.Status)
+	}
+	// CLI edit --tags: validated (trimmed) tag UUIDs replace the whole tag
+	// set via the tg field.
+	if len(payload.Item.P.Tg) != 2 || payload.Item.P.Tg[0] != tagOne || payload.Item.P.Tg[1] != tagTwo {
+		t.Fatalf("tg = %v, want [%s %s]", payload.Item.P.Tg, tagOne, tagTwo)
+	}
+
+	if _, err := server.editTask(taskUUID, "", "", "", []string{"not-a-tag"}, true); err == nil {
+		t.Fatal("non-canonical tag uuid should be rejected")
+	}
+
+	// Batch edit follows the same convention.
+	batchResult, err := server.batchTasks([]batchTaskOp{
+		{Cmd: "edit", UUID: taskUUID, Tags: []string{tagOne}},
+	}, true)
+	if err != nil {
+		t.Fatalf("batch edit with tags failed: %v", err)
+	}
+	var batchPayload struct {
+		Items []struct {
+			P struct {
+				Tg []string `json:"tg"`
+			} `json:"p"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(batchResult.Content[0].Text), &batchPayload); err != nil {
+		t.Fatalf("unmarshal batch dry-run content: %v", err)
+	}
+	if len(batchPayload.Items) != 1 || len(batchPayload.Items[0].P.Tg) != 1 || batchPayload.Items[0].P.Tg[0] != tagOne {
+		t.Fatalf("batch tg = %#v, want [%s]", batchPayload.Items, tagOne)
+	}
+	if _, err := server.batchTasks([]batchTaskOp{
+		{Cmd: "edit", UUID: taskUUID, Tags: []string{"zzzzzzzzzzzzzzzzzzzzzz"}},
+	}, true); err == nil {
+		t.Fatal("batch edit with over-range tag uuid should be rejected")
 	}
 }
 

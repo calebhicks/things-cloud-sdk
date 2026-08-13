@@ -378,6 +378,11 @@ func (u *taskUpdate) Heading(uuid string) *taskUpdate {
 	return u
 }
 
+func (u *taskUpdate) Tags(uuids []string) *taskUpdate {
+	u.fields["tg"] = uuids
+	return u
+}
+
 func (u *taskUpdate) changed() bool {
 	return len(u.fields) > 1 // "md" is always present
 }
@@ -394,13 +399,29 @@ func (u *taskUpdate) build() map[string]any {
 // this struct (with strict decoding) keeps the tool surface aligned with the
 // documented schema.
 type batchTaskOp struct {
-	Cmd       string `json:"cmd"`
-	UUID      string `json:"uuid"`
-	Title     string `json:"title"`
-	Note      string `json:"note"`
-	When      string `json:"when"`
-	Scheduled string `json:"scheduled"`
-	Deadline  string `json:"deadline"`
+	Cmd       string   `json:"cmd"`
+	UUID      string   `json:"uuid"`
+	Title     string   `json:"title"`
+	Note      string   `json:"note"`
+	When      string   `json:"when"`
+	Scheduled string   `json:"scheduled"`
+	Deadline  string   `json:"deadline"`
+	Tags      []string `json:"tags"`
+}
+
+// validateTagUUIDs mirrors the CLI's tag validation (trim each entry, then
+// require a canonical Base58 identifier). Tags replace the task's whole tag
+// set, exactly like CLI edit --tags.
+func validateTagUUIDs(tags []string) ([]string, error) {
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if err := thingscloud.ValidateUUID(tag); err != nil {
+			return nil, fmt.Errorf("tags: %w", err)
+		}
+		out = append(out, tag)
+	}
+	return out, nil
 }
 
 // buildBatchEnvelopes validates and converts batch operations into write
@@ -522,6 +543,13 @@ func buildBatchEdit(op batchTaskOp) (thingscloud.Identifiable, map[string]string
 				u.ScheduleDate(ts)
 			}
 		}
+	}
+	if len(op.Tags) > 0 {
+		tags, err := validateTagUUIDs(op.Tags)
+		if err != nil {
+			return nil, nil, err
+		}
+		u.Tags(tags)
 	}
 	if !u.changed() {
 		return nil, nil, fmt.Errorf("edit requires at least one of title, note, when, scheduled, or deadline")
