@@ -247,7 +247,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "batch_tasks",
 			Title:       "Batch Tasks",
-			Description: "Create, edit, complete, or trash up to 50 tasks. Items are committed sequentially, one write request each.",
+			Description: "Create, edit, complete, trash, or move up to 50 tasks. Items are committed sequentially, one write request each.",
 			InputSchema: objectSchema(map[string]any{
 				"operations": map[string]any{
 					"type":        "array",
@@ -257,7 +257,7 @@ func tools() []toolDefinition {
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"cmd":       enumProp("Operation.", []string{"create", "edit", "complete", "trash"}),
+							"cmd":       enumProp("Operation.", []string{"create", "edit", "complete", "trash", "move-to-today", "move-to-project", "move-to-area"}),
 							"uuid":      stringProp("Task UUID. Optional for create (generated when omitted), required otherwise."),
 							"title":     stringProp("Task title. Required for create."),
 							"note":      stringProp("Task note."),
@@ -266,9 +266,13 @@ func tools() []toolDefinition {
 							"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
 							"tags": map[string]any{
 								"type":        "array",
-								"description": "Tag UUIDs for edit. Replaces the task's whole tag set.",
+								"description": "Tag UUIDs for create or edit. Replaces the task's whole tag set.",
 								"items":       map[string]any{"type": "string"},
 							},
+							"project": stringProp("Project UUID for create, edit, or move-to-project."),
+							"area":    stringProp("Area UUID for create, edit, or move-to-area."),
+							"heading": stringProp("Heading UUID for create or edit."),
+							"type":    enumProp("Item type for create.", []string{"task", "project", "heading"}),
 						},
 						"required":             []string{"cmd"},
 						"additionalProperties": false,

@@ -723,6 +723,124 @@ func TestBatchCreatesGetDistinctPositiveIx(t *testing.T) {
 	}
 }
 
+func TestBatchMoveOpsFollowCLIConventions(t *testing.T) {
+	server := &mcpServer{}
+	taskUUID := thingscloud.NewUUID()
+	projectUUID := thingscloud.NewUUID()
+	areaUUID := thingscloud.NewUUID()
+
+	result, err := server.batchTasks([]batchTaskOp{
+		{Cmd: "move-to-project", UUID: taskUUID, Project: projectUUID},
+		{Cmd: "move-to-area", UUID: thingscloud.NewUUID(), Area: areaUUID},
+		{Cmd: "move-to-today", UUID: thingscloud.NewUUID()},
+	}, true)
+	if err != nil {
+		t.Fatalf("batch move ops failed: %v", err)
+	}
+	var payload struct {
+		Items []struct {
+			T int `json:"t"`
+			P struct {
+				Pr []string        `json:"pr"`
+				Ar []string        `json:"ar"`
+				St *int            `json:"st"`
+				Sr json.RawMessage `json:"sr"`
+			} `json:"p"`
+		} `json:"items"`
+		Results []map[string]string `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content: %v", err)
+	}
+	if len(payload.Items) != 3 {
+		t.Fatalf("items = %d, want 3", len(payload.Items))
+	}
+	// move-to-project: Project(uuid)+Anytime, exactly like the CLI builder.
+	if p := payload.Items[0].P; len(p.Pr) != 1 || p.Pr[0] != projectUUID || p.St == nil || *p.St != 1 || string(p.Sr) != "null" {
+		t.Fatalf("move-to-project payload = %+v, want pr+anytime", p)
+	}
+	// move-to-area: Area(uuid)+Anytime.
+	if p := payload.Items[1].P; len(p.Ar) != 1 || p.Ar[0] != areaUUID || p.St == nil || *p.St != 1 {
+		t.Fatalf("move-to-area payload = %+v, want ar+anytime", p)
+	}
+	// move-to-today: Today() sets st=1 with a concrete date.
+	if p := payload.Items[2].P; p.St == nil || *p.St != 1 || string(p.Sr) == "null" || len(p.Sr) == 0 {
+		t.Fatalf("move-to-today payload = %+v, want st=1 with date", p)
+	}
+	if payload.Results[0]["cmd"] != "move-to-project" || payload.Results[0]["project"] != projectUUID {
+		t.Fatalf("results[0] = %v", payload.Results[0])
+	}
+
+	// Required-field and validation failures.
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "move-to-project", UUID: taskUUID}}, true); err == nil {
+		t.Fatal("move-to-project without project should be rejected")
+	}
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "move-to-area", UUID: taskUUID}}, true); err == nil {
+		t.Fatal("move-to-area without area should be rejected")
+	}
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "move-to-today"}}, true); err == nil {
+		t.Fatal("move-to-today without uuid should be rejected")
+	}
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "move-to-project", UUID: taskUUID, Project: "bogus"}}, true); err == nil {
+		t.Fatal("move-to-project with non-canonical project should be rejected")
+	}
+}
+
+func TestBatchCreateAndEditContainerFields(t *testing.T) {
+	server := &mcpServer{}
+	taskUUID := thingscloud.NewUUID()
+	projectUUID := thingscloud.NewUUID()
+	areaUUID := thingscloud.NewUUID()
+	headingUUID := thingscloud.NewUUID()
+
+	result, err := server.batchTasks([]batchTaskOp{
+		{Cmd: "create", Title: "In project", Project: projectUUID},
+		{Cmd: "create", Title: "A heading", Type: "heading", Project: projectUUID},
+		{Cmd: "edit", UUID: taskUUID, Heading: headingUUID},
+		{Cmd: "edit", UUID: thingscloud.NewUUID(), Area: areaUUID, When: "someday"},
+	}, true)
+	if err != nil {
+		t.Fatalf("batch container ops failed: %v", err)
+	}
+	var payload struct {
+		Items []struct {
+			P struct {
+				Tp  *int     `json:"tp"`
+				Pr  []string `json:"pr"`
+				Ar  []string `json:"ar"`
+				Agr []string `json:"agr"`
+				St  *int     `json:"st"`
+			} `json:"p"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content: %v", err)
+	}
+	// create --project: pr set, and the builder moves it out of Inbox (st=1).
+	if p := payload.Items[0].P; len(p.Pr) != 1 || p.Pr[0] != projectUUID || p.St == nil || *p.St != 1 {
+		t.Fatalf("create-with-project payload = %+v", p)
+	}
+	// create --type heading: tp=2, structural st=1.
+	if p := payload.Items[1].P; p.Tp == nil || *p.Tp != 2 || p.St == nil || *p.St != 1 {
+		t.Fatalf("create-heading payload = %+v", p)
+	}
+	// edit --heading with no explicit schedule: agr plus auto-Anytime.
+	if p := payload.Items[2].P; len(p.Agr) != 1 || p.Agr[0] != headingUUID || p.St == nil || *p.St != 1 {
+		t.Fatalf("edit-heading payload = %+v", p)
+	}
+	// edit --area with explicit when: area set, when wins (st=2 someday).
+	if p := payload.Items[3].P; len(p.Ar) != 1 || p.Ar[0] != areaUUID || p.St == nil || *p.St != 2 {
+		t.Fatalf("edit-area-with-when payload = %+v", p)
+	}
+
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "create", Title: "X", Type: "explosion"}}, true); err == nil {
+		t.Fatal("unknown type should be rejected")
+	}
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "create", Title: "X", Project: "bogus"}}, true); err == nil {
+		t.Fatal("create with non-canonical project should be rejected")
+	}
+}
+
 func TestBatchTasksCommitsSequentially(t *testing.T) {
 	var commits int
 	trashUUID := thingscloud.NewUUID()

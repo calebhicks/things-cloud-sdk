@@ -407,6 +407,33 @@ type batchTaskOp struct {
 	Scheduled string   `json:"scheduled"`
 	Deadline  string   `json:"deadline"`
 	Tags      []string `json:"tags"`
+	Project   string   `json:"project"`
+	Area      string   `json:"area"`
+	Heading   string   `json:"heading"`
+	Type      string   `json:"type"`
+}
+
+// validateBatchOpIdentifiers mirrors the CLI helper of the same name: every
+// option that carries a Things identifier must be canonical before any write,
+// because an invalid identifier poisons the sync history irreparably.
+func validateBatchOpIdentifiers(op batchTaskOp) error {
+	check := map[string]string{
+		"uuid": op.UUID, "project": op.Project, "area": op.Area, "heading": op.Heading,
+	}
+	for name, v := range check {
+		if v == "" {
+			continue
+		}
+		if err := thingscloud.ValidateUUID(v); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	for _, tag := range op.Tags {
+		if err := thingscloud.ValidateUUID(strings.TrimSpace(tag)); err != nil {
+			return fmt.Errorf("tags: %w", err)
+		}
+	}
+	return nil
 }
 
 // validateTagUUIDs mirrors the CLI's tag validation (trim each entry, then
@@ -449,6 +476,12 @@ func buildBatchEnvelopes(ops []batchTaskOp) ([]thingscloud.Identifiable, []map[s
 			env, result, err = buildBatchComplete(op)
 		case "trash":
 			env, result, err = buildBatchTrash(op)
+		case "move-to-today":
+			env, result, err = buildBatchMoveToToday(op)
+		case "move-to-project":
+			env, result, err = buildBatchMoveToProject(op)
+		case "move-to-area":
+			env, result, err = buildBatchMoveToArea(op)
 		default:
 			err = fmt.Errorf("unsupported cmd: %q", op.Cmd)
 		}
@@ -478,11 +511,12 @@ func buildBatchCreate(op batchTaskOp, ix int) (thingscloud.Identifiable, map[str
 		return nil, nil, fmt.Errorf("create requires title")
 	}
 
+	if err := validateBatchOpIdentifiers(op); err != nil {
+		return nil, nil, err
+	}
 	taskUUID := op.UUID
 	if taskUUID == "" {
 		taskUUID = thingscloud.NewUUID()
-	} else if err := thingscloud.ValidateUUID(taskUUID); err != nil {
-		return nil, nil, err
 	}
 
 	opts := map[string]string{}
@@ -501,6 +535,30 @@ func buildBatchCreate(op batchTaskOp, ix int) (thingscloud.Identifiable, map[str
 	if op.Deadline != "" {
 		opts["deadline"] = op.Deadline
 	}
+	if op.Project != "" {
+		opts["project"] = op.Project
+	}
+	if op.Area != "" {
+		opts["area"] = op.Area
+	}
+	if op.Heading != "" {
+		opts["heading"] = op.Heading
+	}
+	if len(op.Tags) > 0 {
+		tags, err := validateTagUUIDs(op.Tags)
+		if err != nil {
+			return nil, nil, err
+		}
+		opts["tags"] = strings.Join(tags, ",")
+	}
+	switch op.Type {
+	case "", "task", "project", "heading":
+		if op.Type != "" {
+			opts["type"] = op.Type
+		}
+	default:
+		return nil, nil, fmt.Errorf("unknown type value: %s", op.Type)
+	}
 
 	payload := newTaskCreatePayload(op.Title, opts)
 	payload.Ix = ix
@@ -512,7 +570,7 @@ func buildBatchEdit(op batchTaskOp) (thingscloud.Identifiable, map[string]string
 	if op.UUID == "" {
 		return nil, nil, fmt.Errorf("edit requires uuid")
 	}
-	if err := thingscloud.ValidateUUID(op.UUID); err != nil {
+	if err := validateBatchOpIdentifiers(op); err != nil {
 		return nil, nil, err
 	}
 
@@ -544,6 +602,28 @@ func buildBatchEdit(op batchTaskOp) (thingscloud.Identifiable, map[string]string
 			}
 		}
 	}
+	// Same convention as the CLI edit command: attaching a container moves
+	// the task out of Inbox unless a schedule (when or scheduled) was
+	// explicit.
+	explicitSchedule := op.When != "" || op.Scheduled != ""
+	if op.Area != "" {
+		u.Area(op.Area)
+		if !explicitSchedule {
+			u.Anytime()
+		}
+	}
+	if op.Project != "" {
+		u.Project(op.Project)
+		if !explicitSchedule {
+			u.Anytime()
+		}
+	}
+	if op.Heading != "" {
+		u.Heading(op.Heading)
+		if !explicitSchedule {
+			u.Anytime()
+		}
+	}
 	if len(op.Tags) > 0 {
 		tags, err := validateTagUUIDs(op.Tags)
 		if err != nil {
@@ -552,7 +632,7 @@ func buildBatchEdit(op batchTaskOp) (thingscloud.Identifiable, map[string]string
 		u.Tags(tags)
 	}
 	if !u.changed() {
-		return nil, nil, fmt.Errorf("edit requires at least one of title, note, when, scheduled, or deadline")
+		return nil, nil, fmt.Errorf("edit requires at least one change")
 	}
 
 	env := writeEnvelope{id: op.UUID, action: 1, kind: "Task6", payload: u.build()}
@@ -581,6 +661,48 @@ func buildBatchTrash(op batchTaskOp) (thingscloud.Identifiable, map[string]strin
 	u := newTaskUpdate().Trash(true)
 	env := writeEnvelope{id: op.UUID, action: 1, kind: "Task6", payload: u.build()}
 	return env, map[string]string{"cmd": "trash", "uuid": op.UUID}, nil
+}
+
+func buildBatchMoveToToday(op batchTaskOp) (thingscloud.Identifiable, map[string]string, error) {
+	if op.UUID == "" {
+		return nil, nil, fmt.Errorf("move-to-today requires uuid")
+	}
+	if err := thingscloud.ValidateUUID(op.UUID); err != nil {
+		return nil, nil, err
+	}
+	u := newTaskUpdate().Today()
+	env := writeEnvelope{id: op.UUID, action: 1, kind: "Task6", payload: u.build()}
+	return env, map[string]string{"cmd": "move-to-today", "uuid": op.UUID}, nil
+}
+
+func buildBatchMoveToProject(op batchTaskOp) (thingscloud.Identifiable, map[string]string, error) {
+	if op.UUID == "" {
+		return nil, nil, fmt.Errorf("move-to-project requires uuid")
+	}
+	if op.Project == "" {
+		return nil, nil, fmt.Errorf("move-to-project requires project")
+	}
+	if err := validateBatchOpIdentifiers(op); err != nil {
+		return nil, nil, err
+	}
+	u := newTaskUpdate().Project(op.Project).Anytime()
+	env := writeEnvelope{id: op.UUID, action: 1, kind: "Task6", payload: u.build()}
+	return env, map[string]string{"cmd": "move-to-project", "uuid": op.UUID, "project": op.Project}, nil
+}
+
+func buildBatchMoveToArea(op batchTaskOp) (thingscloud.Identifiable, map[string]string, error) {
+	if op.UUID == "" {
+		return nil, nil, fmt.Errorf("move-to-area requires uuid")
+	}
+	if op.Area == "" {
+		return nil, nil, fmt.Errorf("move-to-area requires area")
+	}
+	if err := validateBatchOpIdentifiers(op); err != nil {
+		return nil, nil, err
+	}
+	u := newTaskUpdate().Area(op.Area).Anytime()
+	env := writeEnvelope{id: op.UUID, action: 1, kind: "Task6", payload: u.build()}
+	return env, map[string]string{"cmd": "move-to-area", "uuid": op.UUID, "area": op.Area}, nil
 }
 
 func validateWhen(when string) error {
