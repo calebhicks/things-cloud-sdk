@@ -195,7 +195,7 @@ func TestToolsListIncludesCoreTools(t *testing.T) {
 
 func TestCreateTaskDryRunUsesCanonicalUUID(t *testing.T) {
 	server := &mcpServer{}
-	result, err := server.createTask("Dry run task", "note", "today", true)
+	result, err := server.createTask(createTaskArgs{Title: "Dry run task", Note: "note", When: "today", DryRun: true})
 	if err != nil {
 		t.Fatalf("createTask dry-run failed: %v", err)
 	}
@@ -227,6 +227,193 @@ func TestCreateTaskDryRunUsesCanonicalUUID(t *testing.T) {
 	}
 }
 
+func TestCreateTaskFullOptionsFollowCLIConventions(t *testing.T) {
+	server := &mcpServer{}
+	projectUUID := thingscloud.NewUUID()
+	tagUUID := thingscloud.NewUUID()
+	callerUUID := thingscloud.NewUUID()
+
+	result, err := server.createTask(createTaskArgs{
+		Title:     "Full task",
+		Note:      "n",
+		Scheduled: "2026-09-01",
+		Deadline:  "2026-09-15",
+		Project:   projectUUID,
+		Tags:      []string{tagUUID},
+		Checklist: []string{"Step one", "", "Step two"},
+		UUID:      callerUUID,
+		DryRun:    true,
+	})
+	if err != nil {
+		t.Fatalf("createTask failed: %v", err)
+	}
+	var payload struct {
+		Status string `json:"status"`
+		UUID   string `json:"uuid"`
+		Item   struct {
+			P struct {
+				Pr []string `json:"pr"`
+				Tg []string `json:"tg"`
+				St int      `json:"st"`
+				Sr *int64   `json:"sr"`
+				Dd *int64   `json:"dd"`
+			} `json:"p"`
+		} `json:"item"`
+		Checklist []struct {
+			E string `json:"e"`
+			P struct {
+				Tt string   `json:"tt"`
+				Ix int      `json:"ix"`
+				Ts []string `json:"ts"`
+			} `json:"p"`
+		} `json:"checklist"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content: %v", err)
+	}
+	if payload.UUID != callerUUID {
+		t.Fatalf("uuid = %s, want caller-supplied %s", payload.UUID, callerUUID)
+	}
+	p := payload.Item.P
+	if len(p.Pr) != 1 || p.Pr[0] != projectUUID || len(p.Tg) != 1 || p.Tg[0] != tagUUID {
+		t.Fatalf("pr/tg = %v/%v", p.Pr, p.Tg)
+	}
+	// scheduled with default when=inbox: dates set and st promoted to 1
+	// (newTaskCreatePayload's scheduled rule), deadline set.
+	if p.St != 1 || p.Sr == nil || p.Dd == nil {
+		t.Fatalf("st/sr/dd = %d/%v/%v, want scheduled-anytime with deadline", p.St, p.Sr, p.Dd)
+	}
+	// Inline checklist: empty titles skipped, 1-based distinct positive ix,
+	// items reference the task.
+	if len(payload.Checklist) != 2 {
+		t.Fatalf("checklist = %d items, want 2", len(payload.Checklist))
+	}
+	for i, item := range payload.Checklist {
+		if item.E != "ChecklistItem3" || item.P.Ix != i+1 || len(item.P.Ts) != 1 || item.P.Ts[0] != callerUUID {
+			t.Fatalf("checklist[%d] = %+v", i, item)
+		}
+	}
+
+	if _, err := server.createTask(createTaskArgs{Title: "X", UUID: "not-canonical", DryRun: true}); err == nil {
+		t.Fatal("non-canonical caller uuid should be rejected")
+	}
+	if _, err := server.createTask(createTaskArgs{Title: "X", Project: "bogus", DryRun: true}); err == nil {
+		t.Fatal("non-canonical project should be rejected")
+	}
+	if _, err := server.createTask(createTaskArgs{Title: "X", Tags: []string{"bogus"}, DryRun: true}); err == nil {
+		t.Fatal("non-canonical tag should be rejected")
+	}
+}
+
+func TestCreateTaskWithChecklistCommitsSequentially(t *testing.T) {
+	var commits int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/history/history-id/items":
+			fmt.Fprint(w, `{"items":[],"current-item-index":3,"schema":301}`)
+		case "/version/1/history/history-id/commit":
+			commits++
+			var body map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode commit body: %v", err)
+			}
+			if len(body) != 1 {
+				t.Errorf("commit body has %d entries, want 1", len(body))
+			}
+			fmt.Fprintf(w, `{"server-head-index":%d}`, 3+commits)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := thingscloud.New(ts.URL, "test@example.com", "secret")
+	server := &mcpServer{client: client, history: client.HistoryWithID("history-id")}
+
+	result, err := server.createTask(createTaskArgs{Title: "With list", Checklist: []string{"A", "B"}})
+	if err != nil {
+		t.Fatalf("createTask failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("createTask returned tool error: %#v", result)
+	}
+	if commits != 3 {
+		t.Fatalf("commits = %d, want 3 (task + 2 checklist items, one each)", commits)
+	}
+}
+
+func TestEditTaskFullOptionsFollowCLIConventions(t *testing.T) {
+	server := &mcpServer{}
+	taskUUID := thingscloud.NewUUID()
+	projectUUID := thingscloud.NewUUID()
+	headingUUID := thingscloud.NewUUID()
+
+	type editPayload struct {
+		Pr  []string        `json:"pr"`
+		Agr []string        `json:"agr"`
+		St  *int            `json:"st"`
+		Sr  json.RawMessage `json:"sr"`
+		Tir json.RawMessage `json:"tir"`
+		Dd  *int64          `json:"dd"`
+	}
+	decode := func(t *testing.T, result toolResult) editPayload {
+		t.Helper()
+		var payload struct {
+			Item struct {
+				P editPayload `json:"p"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+			t.Fatalf("unmarshal dry-run content: %v", err)
+		}
+		return payload.Item.P
+	}
+
+	// scheduled without when: dates set and start date applied (cmdEdit
+	// convention: Scheduled + ScheduleDate).
+	result, err := server.editTask(editTaskArgs{UUID: taskUUID, Scheduled: "2026-09-01", DryRun: true})
+	if err != nil {
+		t.Fatalf("edit scheduled failed: %v", err)
+	}
+	if p := decode(t, result); len(p.Sr) == 0 || string(p.Sr) == "null" {
+		t.Fatalf("sr = %s, want a date", p.Sr)
+	}
+
+	// project without explicit schedule: auto-Anytime would clobber nothing,
+	// pr set and st=1.
+	result, err = server.editTask(editTaskArgs{UUID: taskUUID, Project: projectUUID, DryRun: true})
+	if err != nil {
+		t.Fatalf("edit project failed: %v", err)
+	}
+	if p := decode(t, result); len(p.Pr) != 1 || p.Pr[0] != projectUUID || p.St == nil || *p.St != 1 {
+		t.Fatalf("edit project payload = %+v", p)
+	}
+
+	// project with explicit scheduled: no auto-Anytime, the scheduled date
+	// survives (hasExplicitSchedule convention).
+	result, err = server.editTask(editTaskArgs{UUID: taskUUID, Project: projectUUID, Scheduled: "2026-09-01", DryRun: true})
+	if err != nil {
+		t.Fatalf("edit project+scheduled failed: %v", err)
+	}
+	if p := decode(t, result); string(p.Sr) == "null" || len(p.Sr) == 0 {
+		t.Fatalf("sr = %s, want scheduled date to survive container attach", p.Sr)
+	}
+
+	// heading and deadline together.
+	result, err = server.editTask(editTaskArgs{UUID: taskUUID, Heading: headingUUID, Deadline: "2026-09-15", DryRun: true})
+	if err != nil {
+		t.Fatalf("edit heading failed: %v", err)
+	}
+	if p := decode(t, result); len(p.Agr) != 1 || p.Agr[0] != headingUUID || p.Dd == nil {
+		t.Fatalf("edit heading payload = %+v", p)
+	}
+
+	if _, err := server.editTask(editTaskArgs{UUID: taskUUID, Heading: "bogus", DryRun: true}); err == nil {
+		t.Fatal("non-canonical heading should be rejected")
+	}
+}
+
 func TestCompleteTaskDryRunDoesNotRequireCloud(t *testing.T) {
 	server := &mcpServer{}
 	taskUUID := thingscloud.NewUUID()
@@ -252,7 +439,7 @@ func TestCompleteTaskDryRunDoesNotRequireCloud(t *testing.T) {
 func TestEditTaskDryRunDoesNotRequireCloud(t *testing.T) {
 	server := &mcpServer{}
 	taskUUID := thingscloud.NewUUID()
-	result, err := server.editTask(taskUUID, "New title", "new note", "anytime", nil, true)
+	result, err := server.editTask(editTaskArgs{UUID: taskUUID, Title: "New title", Note: "new note", When: "anytime", DryRun: true})
 	if err != nil {
 		t.Fatalf("editTask dry-run failed: %v", err)
 	}
@@ -288,7 +475,7 @@ func TestWriteToolsRejectNonCanonicalUUID(t *testing.T) {
 	if _, err := server.completeTask("task-1", true); err == nil {
 		t.Fatal("complete with non-canonical uuid should be rejected")
 	}
-	if _, err := server.editTask("not-a-uuid", "T", "", "", nil, true); err == nil {
+	if _, err := server.editTask(editTaskArgs{UUID: "not-a-uuid", Title: "T", DryRun: true}); err == nil {
 		t.Fatal("edit with non-canonical uuid should be rejected")
 	}
 	if _, err := server.trashTask("zzzzzzzzzzzzzzzzzzzzzz", true); err == nil {
@@ -381,7 +568,7 @@ func TestEditTaskTagsFollowCLIConvention(t *testing.T) {
 	tagOne := thingscloud.NewUUID()
 	tagTwo := thingscloud.NewUUID()
 
-	result, err := server.editTask(taskUUID, "", "", "", []string{tagOne, " " + tagTwo}, true)
+	result, err := server.editTask(editTaskArgs{UUID: taskUUID, Tags: []string{tagOne, " " + tagTwo}, DryRun: true})
 	if err != nil {
 		t.Fatalf("editTask with tags failed: %v", err)
 	}
@@ -405,7 +592,7 @@ func TestEditTaskTagsFollowCLIConvention(t *testing.T) {
 		t.Fatalf("tg = %v, want [%s %s]", payload.Item.P.Tg, tagOne, tagTwo)
 	}
 
-	if _, err := server.editTask(taskUUID, "", "", "", []string{"not-a-tag"}, true); err == nil {
+	if _, err := server.editTask(editTaskArgs{UUID: taskUUID, Tags: []string{"not-a-tag"}, DryRun: true}); err == nil {
 		t.Fatal("non-canonical tag uuid should be rejected")
 	}
 
@@ -928,7 +1115,7 @@ func TestWriteRetriesOnceOnCommitConflict(t *testing.T) {
 	client := thingscloud.New(ts.URL, "test@example.com", "secret")
 	server := &mcpServer{client: client, history: client.HistoryWithID("history-id")}
 
-	result, err := server.createTask("Conflicted", "", "anytime", false)
+	result, err := server.createTask(createTaskArgs{Title: "Conflicted", When: "anytime"})
 	if err != nil {
 		t.Fatalf("createTask failed: %v", err)
 	}
@@ -962,7 +1149,7 @@ func TestWriteDoesNotRetryConflictTwice(t *testing.T) {
 	client := thingscloud.New(ts.URL, "test@example.com", "secret")
 	server := &mcpServer{client: client, history: client.HistoryWithID("history-id")}
 
-	result, err := server.createTask("Still conflicted", "", "anytime", false)
+	result, err := server.createTask(createTaskArgs{Title: "Still conflicted", When: "anytime"})
 	if err != nil {
 		t.Fatalf("createTask failed: %v", err)
 	}

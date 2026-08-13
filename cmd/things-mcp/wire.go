@@ -730,6 +730,34 @@ func applyWhenUpdate(u *taskUpdate, when string) error {
 	return nil
 }
 
+// buildChecklistEnvelopes builds ChecklistItem3 create envelopes for a task,
+// skipping empty titles. Positions are 1-based: distinct positive ix per
+// created item within a run, for the same reason as batch creates (see
+// buildBatchCreate).
+func buildChecklistEnvelopes(taskUUID string, titles []string) []thingscloud.Identifiable {
+	var envelopes []thingscloud.Identifiable
+	now := nowTs()
+	for _, title := range titles {
+		title = strings.TrimSpace(title)
+		if title == "" {
+			continue
+		}
+		payload := checklistItemCreatePayload{
+			Cd: now,
+			Md: nil,
+			Tt: title,
+			Ss: 0,
+			Sp: nil,
+			Ix: len(envelopes) + 1,
+			Ts: []string{taskUUID},
+			Lt: false,
+			Xx: defaultExtension(),
+		}
+		envelopes = append(envelopes, writeEnvelope{id: thingscloud.NewUUID(), action: 0, kind: "ChecklistItem3", payload: payload})
+	}
+	return envelopes
+}
+
 // ---------------------------------------------------------------------------
 // JSON state cache (as in cmd/things-cli, plus an atomic save)
 // ---------------------------------------------------------------------------

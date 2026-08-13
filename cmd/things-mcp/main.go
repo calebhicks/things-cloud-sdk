@@ -195,6 +195,22 @@ func tools() []toolDefinition {
 					"description": "Schedule bucket.",
 					"enum":        []string{"inbox", "today", "anytime", "someday"},
 				},
+				"scheduled": stringProp("Scheduled (start) date as YYYY-MM-DD."),
+				"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
+				"project":   stringProp("Project UUID to create the task in."),
+				"area":      stringProp("Area UUID to create the task in."),
+				"heading":   stringProp("Heading UUID to create the task under."),
+				"tags": map[string]any{
+					"type":        "array",
+					"description": "Tag UUIDs.",
+					"items":       map[string]any{"type": "string"},
+				},
+				"checklist": map[string]any{
+					"type":        "array",
+					"description": "Checklist item titles to create with the task.",
+					"items":       map[string]any{"type": "string"},
+				},
+				"uuid": stringProp("Optional caller-supplied Things Base58 task UUID; generated when omitted."),
 				"dry_run": map[string]any{
 					"type":        "boolean",
 					"description": "Build and return the payload without writing to Things Cloud.",
@@ -230,12 +246,17 @@ func tools() []toolDefinition {
 		{
 			Name:        "edit_task",
 			Title:       "Edit Task",
-			Description: "Edit task title, note, or schedule bucket.",
+			Description: "Edit task title, note, schedule, dates, containers, or tags.",
 			InputSchema: objectSchema(map[string]any{
-				"uuid":  stringProp("Task UUID."),
-				"title": stringProp("New task title."),
-				"note":  stringProp("New task note."),
-				"when":  enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
+				"uuid":      stringProp("Task UUID."),
+				"title":     stringProp("New task title."),
+				"note":      stringProp("New task note."),
+				"when":      enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
+				"scheduled": stringProp("Scheduled (start) date as YYYY-MM-DD."),
+				"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
+				"project":   stringProp("Project UUID to file the task in."),
+				"area":      stringProp("Area UUID to file the task in."),
+				"heading":   stringProp("Heading UUID to file the task under."),
 				"tags": map[string]any{
 					"type":        "array",
 					"description": "Tag UUIDs. Replaces the task's whole tag set.",
@@ -420,16 +441,11 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 		}
 		return s.listTasks("all", args.Query, args.Limit)
 	case "create_task":
-		var args struct {
-			Title  string `json:"title"`
-			Note   string `json:"note"`
-			When   string `json:"when"`
-			DryRun bool   `json:"dry_run"`
-		}
-		if err := decodeArgs(params.Arguments, &args); err != nil {
+		var args createTaskArgs
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
 			return toolResult{}, err
 		}
-		return s.createTask(args.Title, args.Note, args.When, args.DryRun)
+		return s.createTask(args)
 	case "create_project":
 		var args struct {
 			Title  string `json:"title"`
@@ -451,18 +467,11 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 		}
 		return s.completeTask(args.UUID, args.DryRun)
 	case "edit_task":
-		var args struct {
-			UUID   string   `json:"uuid"`
-			Title  string   `json:"title"`
-			Note   string   `json:"note"`
-			When   string   `json:"when"`
-			Tags   []string `json:"tags"`
-			DryRun bool     `json:"dry_run"`
-		}
-		if err := decodeArgs(params.Arguments, &args); err != nil {
+		var args editTaskArgs
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
 			return toolResult{}, err
 		}
-		return s.editTask(args.UUID, args.Title, args.Note, args.When, args.Tags, args.DryRun)
+		return s.editTask(args)
 	case "batch_tasks":
 		var args struct {
 			Operations []batchTaskOp `json:"operations"`
@@ -809,31 +818,99 @@ func sameDay(a, b time.Time) bool {
 	return ay == by && am == bm && ad == bd
 }
 
-func (s *mcpServer) createTask(title, note, when string, dryRun bool) (toolResult, error) {
-	title = strings.TrimSpace(title)
+type createTaskArgs struct {
+	Title     string   `json:"title"`
+	Note      string   `json:"note"`
+	When      string   `json:"when"`
+	Scheduled string   `json:"scheduled"`
+	Deadline  string   `json:"deadline"`
+	Project   string   `json:"project"`
+	Area      string   `json:"area"`
+	Heading   string   `json:"heading"`
+	Tags      []string `json:"tags"`
+	Checklist []string `json:"checklist"`
+	UUID      string   `json:"uuid"`
+	DryRun    bool     `json:"dry_run"`
+}
+
+// createTask mirrors the CLI create command: every option maps onto the same
+// newTaskCreatePayload builder, an optional caller uuid is validated (and
+// generated otherwise), and inline checklist items are written after the
+// task, one commit each.
+func (s *mcpServer) createTask(args createTaskArgs) (toolResult, error) {
+	title := strings.TrimSpace(args.Title)
 	if title == "" {
 		return toolResult{}, fmt.Errorf("title is required")
 	}
+	when := args.When
 	if when == "" {
 		when = "inbox"
 	}
 	if err := validateWhen(when); err != nil {
 		return toolResult{}, err
 	}
-	opts := map[string]string{"when": when}
-	if note != "" {
-		opts["note"] = note
+	for name, id := range map[string]string{"project": args.Project, "area": args.Area, "heading": args.Heading} {
+		if id == "" {
+			continue
+		}
+		if err := thingscloud.ValidateUUID(id); err != nil {
+			return toolResult{}, fmt.Errorf("%s: %w", name, err)
+		}
 	}
-	taskUUID := thingscloud.NewUUID()
+	taskUUID := strings.TrimSpace(args.UUID)
+	if taskUUID == "" {
+		taskUUID = thingscloud.NewUUID()
+	} else if err := thingscloud.ValidateUUID(taskUUID); err != nil {
+		return toolResult{}, fmt.Errorf("uuid: %w", err)
+	}
+
+	opts := map[string]string{"when": when}
+	if args.Note != "" {
+		opts["note"] = args.Note
+	}
+	if args.Scheduled != "" {
+		opts["scheduled"] = args.Scheduled
+	}
+	if args.Deadline != "" {
+		opts["deadline"] = args.Deadline
+	}
+	if args.Project != "" {
+		opts["project"] = args.Project
+	}
+	if args.Area != "" {
+		opts["area"] = args.Area
+	}
+	if args.Heading != "" {
+		opts["heading"] = args.Heading
+	}
+	if len(args.Tags) > 0 {
+		tags, err := validateTagUUIDs(args.Tags)
+		if err != nil {
+			return toolResult{}, err
+		}
+		opts["tags"] = strings.Join(tags, ",")
+	}
+
 	payload := newTaskCreatePayload(title, opts)
 	env := writeEnvelope{id: taskUUID, action: 0, kind: "Task6", payload: payload}
-	if dryRun {
-		return toolJSON(map[string]any{"status": "dry-run", "uuid": taskUUID, "item": env}), nil
+	envelopes := []thingscloud.Identifiable{env}
+	envelopes = append(envelopes, buildChecklistEnvelopes(taskUUID, args.Checklist)...)
+
+	if args.DryRun {
+		out := map[string]any{"status": "dry-run", "uuid": taskUUID, "item": env}
+		if len(envelopes) > 1 {
+			out["checklist"] = envelopes[1:]
+		}
+		return toolJSON(out), nil
 	}
-	if err := s.write(env); err != nil {
+	if err := s.write(envelopes...); err != nil {
 		return toolError(err), nil
 	}
-	return toolJSON(map[string]string{"status": "created", "uuid": taskUUID, "title": title}), nil
+	result := map[string]any{"status": "created", "uuid": taskUUID, "title": title}
+	if len(envelopes) > 1 {
+		result["checklist"] = len(envelopes) - 1
+	}
+	return toolJSON(result), nil
 }
 
 // createProject uses the CLI's existing project-create path: create with
@@ -886,40 +963,98 @@ func (s *mcpServer) completeTask(taskUUID string, dryRun bool) (toolResult, erro
 	return toolJSON(map[string]string{"status": "completed", "uuid": taskUUID}), nil
 }
 
-func (s *mcpServer) editTask(taskUUID, title, note, when string, tags []string, dryRun bool) (toolResult, error) {
-	taskUUID = strings.TrimSpace(taskUUID)
+type editTaskArgs struct {
+	UUID      string   `json:"uuid"`
+	Title     string   `json:"title"`
+	Note      string   `json:"note"`
+	When      string   `json:"when"`
+	Scheduled string   `json:"scheduled"`
+	Deadline  string   `json:"deadline"`
+	Project   string   `json:"project"`
+	Area      string   `json:"area"`
+	Heading   string   `json:"heading"`
+	Tags      []string `json:"tags"`
+	DryRun    bool     `json:"dry_run"`
+}
+
+// editTask mirrors the CLI edit command, option for option: scheduled sets
+// the dates (and the start state when no explicit when was given), attaching
+// an area, project, or heading moves the task out of Inbox unless a schedule
+// (when or scheduled) was explicit, and tags replace the whole tag set.
+func (s *mcpServer) editTask(args editTaskArgs) (toolResult, error) {
+	taskUUID := strings.TrimSpace(args.UUID)
 	if taskUUID == "" {
 		return toolResult{}, fmt.Errorf("uuid is required")
 	}
 	if err := thingscloud.ValidateUUID(taskUUID); err != nil {
 		return toolResult{}, err
 	}
+	for name, id := range map[string]string{"project": args.Project, "area": args.Area, "heading": args.Heading} {
+		if id == "" {
+			continue
+		}
+		if err := thingscloud.ValidateUUID(id); err != nil {
+			return toolResult{}, fmt.Errorf("%s: %w", name, err)
+		}
+	}
+
 	u := newTaskUpdate()
-	if strings.TrimSpace(title) != "" {
-		u.Title(strings.TrimSpace(title))
+	if strings.TrimSpace(args.Title) != "" {
+		u.Title(strings.TrimSpace(args.Title))
 	}
-	if note != "" {
-		u.Note(note)
+	if args.Note != "" {
+		u.Note(args.Note)
 	}
-	if when != "" {
-		if err := applyWhenUpdate(u, when); err != nil {
+	if args.When != "" {
+		if err := applyWhenUpdate(u, args.When); err != nil {
 			return toolResult{}, err
 		}
 	}
-	// Same convention as CLI edit --tags: validated tag UUIDs replace the
-	// task's whole tag set.
-	if len(tags) > 0 {
-		validated, err := validateTagUUIDs(tags)
+	if args.Deadline != "" {
+		if t := parseDate(args.Deadline); t != nil {
+			u.Deadline(t.Unix())
+		}
+	}
+	if args.Scheduled != "" {
+		if t := parseDate(args.Scheduled); t != nil {
+			ts := t.Unix()
+			u.Scheduled(ts, ts)
+			if args.When == "" {
+				u.ScheduleDate(ts)
+			}
+		}
+	}
+	explicitSchedule := args.When != "" || args.Scheduled != ""
+	if args.Area != "" {
+		u.Area(args.Area)
+		if !explicitSchedule {
+			u.Anytime()
+		}
+	}
+	if args.Project != "" {
+		u.Project(args.Project)
+		if !explicitSchedule {
+			u.Anytime()
+		}
+	}
+	if args.Heading != "" {
+		u.Heading(args.Heading)
+		if !explicitSchedule {
+			u.Anytime()
+		}
+	}
+	if len(args.Tags) > 0 {
+		validated, err := validateTagUUIDs(args.Tags)
 		if err != nil {
 			return toolResult{}, err
 		}
 		u.Tags(validated)
 	}
 	if !u.changed() {
-		return toolResult{}, fmt.Errorf("at least one of title, note, when, or tags is required")
+		return toolResult{}, fmt.Errorf("at least one change is required")
 	}
 	env := writeEnvelope{id: taskUUID, action: 1, kind: "Task6", payload: u.build()}
-	if dryRun {
+	if args.DryRun {
 		return toolJSON(map[string]any{"status": "dry-run", "uuid": taskUUID, "item": env}), nil
 	}
 	if err := s.write(env); err != nil {
@@ -1056,28 +1191,7 @@ func (s *mcpServer) addChecklist(taskUUID string, titles []string, dryRun bool) 
 	if err := thingscloud.ValidateUUID(taskUUID); err != nil {
 		return toolResult{}, err
 	}
-	var envelopes []thingscloud.Identifiable
-	now := nowTs()
-	for _, title := range titles {
-		title = strings.TrimSpace(title)
-		if title == "" {
-			continue
-		}
-		payload := checklistItemCreatePayload{
-			Cd: now,
-			Md: nil,
-			Tt: title,
-			Ss: 0,
-			Sp: nil,
-			// Distinct positive ix per created item within a run, for the
-			// same reason as batch creates (see buildBatchCreate).
-			Ix: len(envelopes) + 1,
-			Ts: []string{taskUUID},
-			Lt: false,
-			Xx: defaultExtension(),
-		}
-		envelopes = append(envelopes, writeEnvelope{id: thingscloud.NewUUID(), action: 0, kind: "ChecklistItem3", payload: payload})
-	}
+	envelopes := buildChecklistEnvelopes(taskUUID, titles)
 	if len(envelopes) == 0 {
 		return toolResult{}, fmt.Errorf("at least one checklist item is required")
 	}
