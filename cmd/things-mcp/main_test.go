@@ -316,7 +316,7 @@ func TestBatchTasksDryRunDoesNotRequireCloud(t *testing.T) {
 	}
 }
 
-func TestBatchTasksWritesOneCommit(t *testing.T) {
+func TestBatchTasksCommitsSequentially(t *testing.T) {
 	var commits int
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -324,15 +324,18 @@ func TestBatchTasksWritesOneCommit(t *testing.T) {
 			fmt.Fprint(w, `{"items":[],"current-item-index":3,"schema":301}`)
 		case "/version/1/history/history-id/commit":
 			commits++
-			if got := r.URL.Query().Get("ancestor-index"); got != "3" {
-				t.Errorf("ancestor-index = %s, want 3", got)
+			// First commit builds on the synced head (3); each subsequent
+			// commit chains on the head returned by the previous response.
+			want := map[int]string{1: "3", 2: "5"}[commits]
+			if got := r.URL.Query().Get("ancestor-index"); got != want {
+				t.Errorf("commit %d ancestor-index = %s, want %s", commits, got, want)
 			}
 			var body map[string]json.RawMessage
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode commit body: %v", err)
 			}
-			if len(body) != 2 {
-				t.Errorf("commit body has %d entries, want 2", len(body))
+			if len(body) != 1 {
+				t.Errorf("commit body has %d entries, want 1 (sequential single-item commits)", len(body))
 			}
 			fmt.Fprint(w, `{"server-head-index":5}`)
 		default:
@@ -355,8 +358,8 @@ func TestBatchTasksWritesOneCommit(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("batchTasks returned tool error: %#v", result)
 	}
-	if commits != 1 {
-		t.Fatalf("commits = %d, want 1", commits)
+	if commits != 2 {
+		t.Fatalf("commits = %d, want 2 (one commit per item)", commits)
 	}
 	var payload struct {
 		Status     string              `json:"status"`

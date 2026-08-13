@@ -997,7 +997,18 @@ func (s *mcpServer) write(items ...thingscloud.Identifiable) error {
 	if err := s.history.Sync(); err != nil {
 		return fmt.Errorf("sync history: %w", err)
 	}
-	return s.history.Write(items...)
+	// Sequential single-item commits. Multi-item map commits have twice
+	// produced histories that crash real Things clients while applying the
+	// pull (base58 decoder trap in the legacy sync path); one-item commits
+	// have a clean record on real clients. Each Write advances
+	// LatestServerIndex from the server response, so commits chain on the
+	// correct ancestor-index without re-syncing between items.
+	for i, item := range items {
+		if err := s.history.Write(item); err != nil {
+			return fmt.Errorf("write item %d/%d (%s): %w", i+1, len(items), item.UUID(), err)
+		}
+	}
+	return nil
 }
 
 func toolJSON(v any) toolResult {
