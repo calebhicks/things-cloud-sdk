@@ -436,7 +436,7 @@ func scheduledProp() map[string]any {
 }
 
 func deadlineProp() map[string]any {
-	return stringProp("Deadline as YYYY-MM-DD. Only for real external due dates with consequences for missing them — never a priority flag, never a reminder. Use a start date (scheduled) to plan the work itself.")
+	return stringProp("Deadline as YYYY-MM-DD, or \"none\" to remove an existing deadline. Only for real external due dates with consequences for missing them — never a priority flag, never a reminder. Use a start date (scheduled) to plan the work itself.")
 }
 
 func tagsProp(context string) map[string]any {
@@ -1318,7 +1318,9 @@ func (s *mcpServer) editTask(args editTaskArgs) (toolResult, error) {
 		}
 	}
 	if args.Deadline != "" {
-		if t := parseDate(args.Deadline); t != nil {
+		if args.Deadline == "none" {
+			u.ClearDeadline()
+		} else if t := parseDate(args.Deadline); t != nil {
 			u.Deadline(t.Unix())
 		}
 	}

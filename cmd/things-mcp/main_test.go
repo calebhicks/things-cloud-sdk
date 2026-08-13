@@ -1518,3 +1518,15 @@ func TestAddChecklistDryRunDoesNotRequireCloud(t *testing.T) {
 		t.Fatalf("checklist ix = %d,%d, want distinct positive 1,2", payload.Items[0].P.Ix, payload.Items[1].P.Ix)
 	}
 }
+
+func TestEditTaskDeadlineNoneClearsWithNull(t *testing.T) {
+	u := newTaskUpdate()
+	u.ClearDeadline()
+	bs, err := json.Marshal(u.build())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(bs), `"dd":null`) {
+		t.Fatalf("expected explicit dd:null in update payload, got %s", bs)
+	}
+}

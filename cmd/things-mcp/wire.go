@@ -365,6 +365,13 @@ func (u *taskUpdate) Deadline(dd int64) *taskUpdate {
 	return u
 }
 
+// ClearDeadline removes a deadline: native clients clear the field by
+// writing an explicit null in the update payload.
+func (u *taskUpdate) ClearDeadline() *taskUpdate {
+	u.fields["dd"] = nil
+	return u
+}
+
 func (u *taskUpdate) Scheduled(sr, tir int64) *taskUpdate {
 	u.fields["sr"] = sr
 	u.fields["tir"] = tir
@@ -595,7 +602,9 @@ func buildBatchEdit(op batchTaskOp) (thingscloud.Identifiable, map[string]string
 		}
 	}
 	if op.Deadline != "" {
-		if t := parseDate(op.Deadline); t != nil {
+		if op.Deadline == "none" {
+			u.ClearDeadline()
+		} else if t := parseDate(op.Deadline); t != nil {
 			u.Deadline(t.Unix())
 		}
 	}
