@@ -347,6 +347,15 @@ func tools() []toolDefinition {
 			}, []string{"uuid"}),
 		},
 		{
+			Name:        "purge_task",
+			Title:       "Purge Task",
+			Description: "PERMANENTLY delete a task by writing a tombstone. Unlike trash_task this is unrecoverable: the task cannot be restored from Things' Trash afterwards. Hosts must require explicit human confirmation before calling this without dry_run.",
+			InputSchema: objectSchema(map[string]any{
+				"uuid":    stringProp("UUID of the task to permanently delete."),
+				"dry_run": dryRunProp(),
+			}, []string{"uuid"}),
+		},
+		{
 			Name:        "move_task",
 			Title:       "Move Task",
 			Description: "Move a task to a project, an area, or the inbox. Optionally place it under a heading when moving to a project.",
@@ -556,6 +565,15 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 			return toolResult{}, err
 		}
 		return s.trashTask(args.UUID, args.DryRun)
+	case "purge_task":
+		var args struct {
+			UUID   string `json:"uuid"`
+			DryRun bool   `json:"dry_run"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.purgeTask(args.UUID, args.DryRun)
 	case "move_task":
 		var args struct {
 			UUID    string `json:"uuid"`
@@ -1227,6 +1245,35 @@ func (s *mcpServer) editTask(args editTaskArgs) (toolResult, error) {
 
 func (s *mcpServer) trashTask(taskUUID string, dryRun bool) (toolResult, error) {
 	return s.writeTaskUpdate(taskUUID, newTaskUpdate().Trash(true), dryRun, "trashed")
+}
+
+// purgeTask mirrors the CLI purge command exactly: a Tombstone2 create whose
+// dloid names the task and whose own envelope UUID is freshly generated
+// (cmd/things-cli cmdPurge). The target UUID is validated here even though
+// the CLI skips it, because dloid is written to the wire and an invalid
+// identifier poisons the history. Purge is permanent; it is deliberately not
+// a batch operation.
+func (s *mcpServer) purgeTask(taskUUID string, dryRun bool) (toolResult, error) {
+	taskUUID = strings.TrimSpace(taskUUID)
+	if taskUUID == "" {
+		return toolResult{}, fmt.Errorf("uuid is required")
+	}
+	if err := thingscloud.ValidateUUID(taskUUID); err != nil {
+		return toolResult{}, err
+	}
+	tombstoneUUID := thingscloud.NewUUID()
+	payload := map[string]any{
+		"dloid": taskUUID,
+		"dld":   nowTs(),
+	}
+	env := writeEnvelope{id: tombstoneUUID, action: 0, kind: "Tombstone2", payload: payload}
+	if dryRun {
+		return toolJSON(map[string]any{"status": "dry-run", "uuid": taskUUID, "item": env}), nil
+	}
+	if err := s.write(env); err != nil {
+		return toolError(err), nil
+	}
+	return toolJSON(map[string]string{"status": "purged", "uuid": taskUUID}), nil
 }
 
 // moveTask mirrors the CLI's move conventions: move-to-project is

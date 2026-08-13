@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	thingscloud "github.com/arthursoares/things-cloud-sdk"
@@ -183,6 +184,7 @@ func TestToolsListIncludesCoreTools(t *testing.T) {
 		"edit_task",
 		"batch_tasks",
 		"trash_task",
+		"purge_task",
 		"move_task",
 		"move_task_to_today",
 		"add_checklist",
@@ -724,6 +726,58 @@ func TestEditTaskTagsFollowCLIConvention(t *testing.T) {
 		{Cmd: "edit", UUID: taskUUID, Tags: []string{"zzzzzzzzzzzzzzzzzzzzzz"}},
 	}, true); err == nil {
 		t.Fatal("batch edit with over-range tag uuid should be rejected")
+	}
+}
+
+func TestPurgeTaskWritesTombstone(t *testing.T) {
+	server := &mcpServer{}
+	taskUUID := thingscloud.NewUUID()
+
+	result, err := server.purgeTask(taskUUID, true)
+	if err != nil {
+		t.Fatalf("purgeTask dry-run failed: %v", err)
+	}
+	var payload struct {
+		Status string `json:"status"`
+		UUID   string `json:"uuid"`
+		Item   struct {
+			T int    `json:"t"`
+			E string `json:"e"`
+			P struct {
+				Dloid string   `json:"dloid"`
+				Dld   *float64 `json:"dld"`
+			} `json:"p"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content: %v", err)
+	}
+	// CLI purge: a Tombstone2 CREATE whose dloid names the target and whose
+	// envelope uuid is a fresh identifier, not the task's.
+	if payload.Item.E != "Tombstone2" || payload.Item.T != 0 {
+		t.Fatalf("item = %+v, want Tombstone2 create", payload.Item)
+	}
+	if payload.Item.P.Dloid != taskUUID || payload.Item.P.Dld == nil {
+		t.Fatalf("tombstone payload = %+v, want dloid=%s with dld", payload.Item.P, taskUUID)
+	}
+
+	if _, err := server.purgeTask("task-1", true); err == nil {
+		t.Fatal("non-canonical uuid should be rejected even for purge dry-run")
+	}
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "purge", UUID: taskUUID}}, true); err == nil {
+		t.Fatal("purge must not be available as a batch op")
+	}
+
+	// The tool description must carry the permanence warning for hosts.
+	for _, tool := range tools() {
+		if tool.Name != "purge_task" {
+			continue
+		}
+		for _, want := range []string{"PERMANENTLY", "unrecoverable", "human confirmation"} {
+			if !strings.Contains(strings.ToLower(tool.Description), strings.ToLower(want)) {
+				t.Fatalf("purge_task description missing %q: %s", want, tool.Description)
+			}
+		}
 	}
 }
 
