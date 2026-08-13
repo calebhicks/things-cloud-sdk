@@ -266,6 +266,19 @@ func tools() []toolDefinition {
 			}, []string{"uuid"}),
 		},
 		{
+			Name:        "move_task",
+			Title:       "Move Task",
+			Description: "Move a task to a project, an area, or the inbox. Optionally place it under a heading when moving to a project.",
+			InputSchema: objectSchema(map[string]any{
+				"uuid":    stringProp("Task UUID."),
+				"project": stringProp("Destination project UUID."),
+				"area":    stringProp("Destination area UUID."),
+				"inbox":   map[string]any{"type": "boolean", "description": "Move the task to the inbox."},
+				"heading": stringProp("Heading UUID inside the destination project."),
+				"dry_run": dryRunProp(),
+			}, []string{"uuid"}),
+		},
+		{
 			Name:        "move_task_to_today",
 			Title:       "Move Task To Today",
 			Description: "Schedule a task for Today.",
@@ -431,6 +444,19 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 			return toolResult{}, err
 		}
 		return s.trashTask(args.UUID, args.DryRun)
+	case "move_task":
+		var args struct {
+			UUID    string `json:"uuid"`
+			Project string `json:"project"`
+			Area    string `json:"area"`
+			Inbox   bool   `json:"inbox"`
+			Heading string `json:"heading"`
+			DryRun  bool   `json:"dry_run"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.moveTask(args.UUID, args.Project, args.Area, args.Heading, args.Inbox, args.DryRun)
 	case "move_task_to_today":
 		var args struct {
 			UUID   string `json:"uuid"`
@@ -827,6 +853,71 @@ func (s *mcpServer) editTask(taskUUID, title, note, when string, dryRun bool) (t
 
 func (s *mcpServer) trashTask(taskUUID string, dryRun bool) (toolResult, error) {
 	return s.writeTaskUpdate(taskUUID, newTaskUpdate().Trash(true), dryRun, "trashed")
+}
+
+// moveTask mirrors the CLI's move conventions: move-to-project is
+// Project(uuid)+Anytime, move-to-area is Area(uuid)+Anytime (batch builders
+// buildBatchMoveToProject/buildBatchMoveToArea), inbox is the edit command's
+// --when inbox (Inbox()), and heading is the edit command's --heading
+// (Heading(uuid), the agr field). Like the CLI, a move never touches ix and
+// never clears other container fields. A heading only exists inside a
+// project, so it is accepted only alongside a project destination.
+func (s *mcpServer) moveTask(taskUUID, project, area, heading string, inbox, dryRun bool) (toolResult, error) {
+	taskUUID = strings.TrimSpace(taskUUID)
+	if taskUUID == "" {
+		return toolResult{}, fmt.Errorf("uuid is required")
+	}
+	if err := thingscloud.ValidateUUID(taskUUID); err != nil {
+		return toolResult{}, err
+	}
+	targets := 0
+	for _, set := range []bool{project != "", area != "", inbox} {
+		if set {
+			targets++
+		}
+	}
+	if targets != 1 {
+		return toolResult{}, fmt.Errorf("exactly one of project, area, or inbox is required")
+	}
+	if heading != "" && project == "" {
+		return toolResult{}, fmt.Errorf("heading requires a project destination")
+	}
+
+	u := newTaskUpdate()
+	result := map[string]string{"status": "moved", "uuid": taskUUID}
+	switch {
+	case project != "":
+		if err := thingscloud.ValidateUUID(project); err != nil {
+			return toolResult{}, fmt.Errorf("project: %w", err)
+		}
+		u.Project(project).Anytime()
+		result["project"] = project
+		if heading != "" {
+			if err := thingscloud.ValidateUUID(heading); err != nil {
+				return toolResult{}, fmt.Errorf("heading: %w", err)
+			}
+			u.Heading(heading)
+			result["heading"] = heading
+		}
+	case area != "":
+		if err := thingscloud.ValidateUUID(area); err != nil {
+			return toolResult{}, fmt.Errorf("area: %w", err)
+		}
+		u.Area(area).Anytime()
+		result["area"] = area
+	default:
+		u.Inbox()
+		result["inbox"] = "true"
+	}
+
+	env := writeEnvelope{id: taskUUID, action: 1, kind: "Task6", payload: u.build()}
+	if dryRun {
+		return toolJSON(map[string]any{"status": "dry-run", "uuid": taskUUID, "item": env}), nil
+	}
+	if err := s.write(env); err != nil {
+		return toolError(err), nil
+	}
+	return toolJSON(result), nil
 }
 
 func (s *mcpServer) moveTaskToToday(taskUUID string, dryRun bool) (toolResult, error) {

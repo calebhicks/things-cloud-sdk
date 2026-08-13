@@ -179,6 +179,7 @@ func TestToolsListIncludesCoreTools(t *testing.T) {
 		"edit_task",
 		"batch_tasks",
 		"trash_task",
+		"move_task",
 		"move_task_to_today",
 		"add_checklist",
 		"list_projects",
@@ -300,6 +301,207 @@ func TestWriteToolsRejectNonCanonicalUUID(t *testing.T) {
 	}
 	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "create", Title: "X", UUID: "task-1"}}, true); err == nil {
 		t.Fatal("batch create with non-canonical caller uuid should be rejected")
+	}
+}
+
+func TestMoveTaskDryRunFollowsCLIConventions(t *testing.T) {
+	server := &mcpServer{}
+	taskUUID := thingscloud.NewUUID()
+	projectUUID := thingscloud.NewUUID()
+	areaUUID := thingscloud.NewUUID()
+	headingUUID := thingscloud.NewUUID()
+
+	type movePayload struct {
+		Pr  []string        `json:"pr"`
+		Ar  []string        `json:"ar"`
+		Agr []string        `json:"agr"`
+		St  *int            `json:"st"`
+		Sr  json.RawMessage `json:"sr"`
+		Ix  *int            `json:"ix"`
+	}
+	decode := func(t *testing.T, result toolResult) movePayload {
+		t.Helper()
+		var payload struct {
+			Status string `json:"status"`
+			UUID   string `json:"uuid"`
+			Item   struct {
+				T int         `json:"t"`
+				E string      `json:"e"`
+				P movePayload `json:"p"`
+			} `json:"item"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+			t.Fatalf("unmarshal dry-run content: %v", err)
+		}
+		if payload.Status != "dry-run" || payload.UUID != taskUUID {
+			t.Fatalf("payload = %#v, want dry-run for %s", payload, taskUUID)
+		}
+		if payload.Item.T != 1 || payload.Item.E != "Task6" {
+			t.Fatalf("item = %#v, want Task6 update", payload.Item)
+		}
+		if payload.Item.P.Ix != nil {
+			t.Fatalf("move must not touch ix, got %v", *payload.Item.P.Ix)
+		}
+		return payload.Item.P
+	}
+
+	t.Run("project", func(t *testing.T) {
+		result, err := server.moveTask(taskUUID, projectUUID, "", "", false, true)
+		if err != nil {
+			t.Fatalf("moveTask failed: %v", err)
+		}
+		p := decode(t, result)
+		// CLI buildBatchMoveToProject: Project(uuid).Anytime().
+		if len(p.Pr) != 1 || p.Pr[0] != projectUUID {
+			t.Fatalf("pr = %v, want [%s]", p.Pr, projectUUID)
+		}
+		if p.St == nil || *p.St != 1 {
+			t.Fatalf("st = %v, want 1 (anytime)", p.St)
+		}
+		if string(p.Sr) != "null" {
+			t.Fatalf("sr = %s, want explicit null", p.Sr)
+		}
+	})
+
+	t.Run("project with heading", func(t *testing.T) {
+		result, err := server.moveTask(taskUUID, projectUUID, "", headingUUID, false, true)
+		if err != nil {
+			t.Fatalf("moveTask failed: %v", err)
+		}
+		p := decode(t, result)
+		if len(p.Pr) != 1 || p.Pr[0] != projectUUID {
+			t.Fatalf("pr = %v, want [%s]", p.Pr, projectUUID)
+		}
+		// CLI edit --heading: agr carries the heading uuid.
+		if len(p.Agr) != 1 || p.Agr[0] != headingUUID {
+			t.Fatalf("agr = %v, want [%s]", p.Agr, headingUUID)
+		}
+	})
+
+	t.Run("area", func(t *testing.T) {
+		result, err := server.moveTask(taskUUID, "", areaUUID, "", false, true)
+		if err != nil {
+			t.Fatalf("moveTask failed: %v", err)
+		}
+		p := decode(t, result)
+		// CLI buildBatchMoveToArea: Area(uuid).Anytime().
+		if len(p.Ar) != 1 || p.Ar[0] != areaUUID {
+			t.Fatalf("ar = %v, want [%s]", p.Ar, areaUUID)
+		}
+		if p.St == nil || *p.St != 1 {
+			t.Fatalf("st = %v, want 1 (anytime)", p.St)
+		}
+	})
+
+	t.Run("inbox", func(t *testing.T) {
+		result, err := server.moveTask(taskUUID, "", "", "", true, true)
+		if err != nil {
+			t.Fatalf("moveTask failed: %v", err)
+		}
+		p := decode(t, result)
+		// CLI edit --when inbox: Schedule(0, nil, nil).
+		if p.St == nil || *p.St != 0 {
+			t.Fatalf("st = %v, want 0 (inbox)", p.St)
+		}
+		if string(p.Sr) != "null" {
+			t.Fatalf("sr = %s, want explicit null", p.Sr)
+		}
+		if len(p.Pr) != 0 && p.Pr != nil {
+			t.Fatalf("inbox move must not set pr, got %v", p.Pr)
+		}
+	})
+}
+
+func TestMoveTaskValidation(t *testing.T) {
+	server := &mcpServer{}
+	taskUUID := thingscloud.NewUUID()
+	projectUUID := thingscloud.NewUUID()
+	areaUUID := thingscloud.NewUUID()
+
+	if _, err := server.moveTask(taskUUID, "", "", "", false, true); err == nil {
+		t.Fatal("no destination should be rejected")
+	}
+	if _, err := server.moveTask(taskUUID, projectUUID, areaUUID, "", false, true); err == nil {
+		t.Fatal("two destinations should be rejected")
+	}
+	if _, err := server.moveTask(taskUUID, projectUUID, "", "", true, true); err == nil {
+		t.Fatal("project plus inbox should be rejected")
+	}
+	if _, err := server.moveTask(taskUUID, "", areaUUID, thingscloud.NewUUID(), false, true); err == nil {
+		t.Fatal("heading with area should be rejected")
+	}
+	if _, err := server.moveTask(taskUUID, "", "", thingscloud.NewUUID(), true, true); err == nil {
+		t.Fatal("heading with inbox should be rejected")
+	}
+	if _, err := server.moveTask("task-1", projectUUID, "", "", false, true); err == nil {
+		t.Fatal("non-canonical task uuid should be rejected")
+	}
+	if _, err := server.moveTask(taskUUID, "not-a-uuid", "", "", false, true); err == nil {
+		t.Fatal("non-canonical project uuid should be rejected")
+	}
+	if _, err := server.moveTask(taskUUID, projectUUID, "", "zzzzzzzzzzzzzzzzzzzzzz", false, true); err == nil {
+		t.Fatal("non-canonical heading uuid should be rejected")
+	}
+	if _, err := server.moveTask(taskUUID, "", "zzzzzzzzzzzzzzzzzzzzzz", "", false, true); err == nil {
+		t.Fatal("non-canonical area uuid should be rejected")
+	}
+
+	// Unknown argument fields must fail loudly, not silently drop.
+	if _, err := server.callTool(json.RawMessage(`{"name":"move_task","arguments":{"uuid":"` + taskUUID + `","projct":"` + projectUUID + `","dry_run":true}}`)); err == nil {
+		t.Fatal("unknown move_task field should be rejected")
+	}
+}
+
+func TestMoveTaskCommitsOneWrite(t *testing.T) {
+	var commits int
+	taskUUID := thingscloud.NewUUID()
+	projectUUID := thingscloud.NewUUID()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/history/history-id/items":
+			fmt.Fprint(w, `{"items":[],"current-item-index":3,"schema":301}`)
+		case "/version/1/history/history-id/commit":
+			commits++
+			if got := r.URL.Query().Get("ancestor-index"); got != "3" {
+				t.Errorf("ancestor-index = %s, want 3", got)
+			}
+			var body map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode commit body: %v", err)
+			}
+			if len(body) != 1 {
+				t.Errorf("commit body has %d entries, want 1", len(body))
+			}
+			if _, ok := body[taskUUID]; !ok {
+				t.Errorf("commit body missing task %s", taskUUID)
+			}
+			fmt.Fprint(w, `{"server-head-index":4}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := thingscloud.New(ts.URL, "test@example.com", "secret")
+	server := &mcpServer{client: client, history: client.HistoryWithID("history-id")}
+
+	result, err := server.moveTask(taskUUID, projectUUID, "", "", false, false)
+	if err != nil {
+		t.Fatalf("moveTask failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("moveTask returned tool error: %#v", result)
+	}
+	if commits != 1 {
+		t.Fatalf("commits = %d, want 1", commits)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if payload["status"] != "moved" || payload["uuid"] != taskUUID || payload["project"] != projectUUID {
+		t.Fatalf("payload = %#v, want moved to %s", payload, projectUUID)
 	}
 }
 

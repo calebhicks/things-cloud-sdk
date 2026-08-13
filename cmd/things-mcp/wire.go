@@ -363,6 +363,21 @@ func (u *taskUpdate) Scheduled(sr, tir int64) *taskUpdate {
 	return u
 }
 
+func (u *taskUpdate) Area(uuid string) *taskUpdate {
+	u.fields["ar"] = []string{uuid}
+	return u
+}
+
+func (u *taskUpdate) Project(uuid string) *taskUpdate {
+	u.fields["pr"] = []string{uuid}
+	return u
+}
+
+func (u *taskUpdate) Heading(uuid string) *taskUpdate {
+	u.fields["agr"] = []string{uuid}
+	return u
+}
+
 func (u *taskUpdate) changed() bool {
 	return len(u.fields) > 1 // "md" is always present
 }
