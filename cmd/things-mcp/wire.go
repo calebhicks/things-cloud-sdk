@@ -396,6 +396,7 @@ func buildBatchEnvelopes(ops []batchTaskOp) ([]thingscloud.Identifiable, []map[s
 	envelopes := make([]thingscloud.Identifiable, 0, len(ops))
 	results := make([]map[string]string, 0, len(ops))
 	seen := map[string]struct{}{}
+	created := 0
 	for i, op := range ops {
 		var (
 			env    thingscloud.Identifiable
@@ -404,7 +405,8 @@ func buildBatchEnvelopes(ops []batchTaskOp) ([]thingscloud.Identifiable, []map[s
 		)
 		switch op.Cmd {
 		case "create":
-			env, result, err = buildBatchCreate(op)
+			created++
+			env, result, err = buildBatchCreate(op, created)
 		case "edit":
 			env, result, err = buildBatchEdit(op)
 		case "complete":
@@ -427,7 +429,15 @@ func buildBatchEnvelopes(ops []batchTaskOp) ([]thingscloud.Identifiable, []map[s
 	return envelopes, results, nil
 }
 
-func buildBatchCreate(op batchTaskOp) (thingscloud.Identifiable, map[string]string, error) {
+// buildBatchCreate builds a Task6 create envelope. ix is this create's
+// 1-based position among the batch's creates.
+//
+// The v0.4 CLI leaves ix at 0 on create. Both history-poisoning batches from
+// the 2026-08-12 incident sent ix:0 for all 14 creates, and
+// wbopan/things-cloud-mcp documents ix <= 0 as a deterministic crash in
+// Things' legacy sync path — so every created item in an MCP batch gets a
+// distinct positive ix instead.
+func buildBatchCreate(op batchTaskOp, ix int) (thingscloud.Identifiable, map[string]string, error) {
 	if strings.TrimSpace(op.Title) == "" {
 		return nil, nil, fmt.Errorf("create requires title")
 	}
@@ -457,6 +467,7 @@ func buildBatchCreate(op batchTaskOp) (thingscloud.Identifiable, map[string]stri
 	}
 
 	payload := newTaskCreatePayload(op.Title, opts)
+	payload.Ix = ix
 	env := writeEnvelope{id: taskUUID, action: 0, kind: "Task6", payload: payload}
 	return env, map[string]string{"cmd": "create", "uuid": taskUUID, "title": op.Title}, nil
 }

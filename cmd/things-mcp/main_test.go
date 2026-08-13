@@ -342,6 +342,53 @@ func TestBatchTasksDryRunDoesNotRequireCloud(t *testing.T) {
 	}
 }
 
+func TestBatchCreatesGetDistinctPositiveIx(t *testing.T) {
+	server := &mcpServer{}
+	result, err := server.batchTasks([]batchTaskOp{
+		{Cmd: "create", Title: "One"},
+		{Cmd: "complete", UUID: thingscloud.NewUUID()},
+		{Cmd: "create", Title: "Two"},
+		{Cmd: "create", Title: "Three"},
+	}, true)
+	if err != nil {
+		t.Fatalf("batchTasks dry-run failed: %v", err)
+	}
+	var payload struct {
+		Items []struct {
+			T int `json:"t"`
+			P struct {
+				Ix *int `json:"ix"`
+			} `json:"p"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content failed: %v", err)
+	}
+	if len(payload.Items) != 4 {
+		t.Fatalf("items = %d, want 4", len(payload.Items))
+	}
+	// Both poisoned batches from the 2026-08-12 incident sent ix:0 for every
+	// create; ix must be distinct and positive per created item.
+	wantIx := map[int]int{0: 1, 2: 2, 3: 3}
+	seen := map[int]bool{}
+	for i, item := range payload.Items {
+		want, isCreate := wantIx[i]
+		if !isCreate {
+			continue
+		}
+		if item.T != 0 {
+			t.Fatalf("item %d action = %d, want create", i, item.T)
+		}
+		if item.P.Ix == nil || *item.P.Ix != want {
+			t.Fatalf("item %d ix = %v, want %d", i, item.P.Ix, want)
+		}
+		if *item.P.Ix <= 0 || seen[*item.P.Ix] {
+			t.Fatalf("item %d ix = %d, want distinct positive", i, *item.P.Ix)
+		}
+		seen[*item.P.Ix] = true
+	}
+}
+
 func TestBatchTasksCommitsSequentially(t *testing.T) {
 	var commits int
 	trashUUID := thingscloud.NewUUID()
@@ -439,6 +486,9 @@ func TestAddChecklistDryRunDoesNotRequireCloud(t *testing.T) {
 		UUID   string `json:"uuid"`
 		Items  []struct {
 			E string `json:"e"`
+			P struct {
+				Ix int `json:"ix"`
+			} `json:"p"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
@@ -449,5 +499,8 @@ func TestAddChecklistDryRunDoesNotRequireCloud(t *testing.T) {
 	}
 	if payload.Items[0].E != "ChecklistItem3" {
 		t.Fatalf("item kind = %q, want ChecklistItem3", payload.Items[0].E)
+	}
+	if payload.Items[0].P.Ix != 1 || payload.Items[1].P.Ix != 2 {
+		t.Fatalf("checklist ix = %d,%d, want distinct positive 1,2", payload.Items[0].P.Ix, payload.Items[1].P.Ix)
 	}
 }

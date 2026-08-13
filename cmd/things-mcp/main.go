@@ -901,7 +901,9 @@ func (s *mcpServer) addChecklist(taskUUID string, titles []string, dryRun bool) 
 			Tt: title,
 			Ss: 0,
 			Sp: nil,
-			Ix: len(envelopes),
+			// Distinct positive ix per created item within a run, for the
+			// same reason as batch creates (see buildBatchCreate).
+			Ix: len(envelopes) + 1,
 			Ts: []string{taskUUID},
 			Lt: false,
 			Xx: defaultExtension(),
