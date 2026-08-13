@@ -105,6 +105,50 @@ func TestLoadStateWithCacheResetsWhenCursorAheadOfServer(t *testing.T) {
 	}
 }
 
+func TestIsThingsBase58UUID(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"real Things 22-char uuid", "Q9sihFX2SsvGaz6vv4J2Hf", true},
+		{"real Things 21-char uuid", "79UbvpD3TF5sBdnxPAKSX", true},
+		{"22 chars decoding above 2^128", "zzzzzzzzzzzzzzzzzzzzzz", false},
+		{"too short even if valid alphabet", "2NEpo7TZRRrLZSi2U", false},
+		{"20 valid chars rejected by length", "23456789ABCDEFGHJKLM", false},
+		{"23 valid chars rejected by length", "23456789ABCDEFGHJKLMNPQ", false},
+		{"forbidden zero digit", "09sihFX2SsvGaz6vv4J2Hf", false},
+		{"forbidden capital O", "O9sihFX2SsvGaz6vv4J2Hf", false},
+		{"forbidden capital I", "I9sihFX2SsvGaz6vv4J2Hf", false},
+		{"forbidden lowercase l", "l9sihFX2SsvGaz6vv4J2Hf", false},
+		{"rfc-4122 uuid", "1D002849-0B2F-42F8-B584", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isThingsBase58UUID(tc.in); got != tc.want {
+				t.Fatalf("isThingsBase58UUID(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBatchCreateRejectsUndecodableUUID(t *testing.T) {
+	if _, _, err := buildBatchCreate(BatchOp{Cmd: "create", Title: "X", UUID: "zzzzzzzzzzzzzzzzzzzzzz"}); err == nil {
+		t.Fatal("22-char uuid decoding above 2^128 should be rejected")
+	}
+	if _, _, err := buildBatchCreate(BatchOp{Cmd: "create", Title: "X", UUID: "not-a-things-uuid"}); err == nil {
+		t.Fatal("non-Base58 uuid should be rejected")
+	}
+	env, result, err := buildBatchCreate(BatchOp{Cmd: "create", Title: "X", UUID: "Q9sihFX2SsvGaz6vv4J2Hf"})
+	if err != nil {
+		t.Fatalf("valid caller uuid rejected: %v", err)
+	}
+	if env.UUID() != "Q9sihFX2SsvGaz6vv4J2Hf" || result["uuid"] != "Q9sihFX2SsvGaz6vv4J2Hf" {
+		t.Fatalf("caller uuid not preserved: env=%q result=%q", env.UUID(), result["uuid"])
+	}
+}
+
 func TestBuildBatchValidatesOperations(t *testing.T) {
 	if _, _, err := BuildBatch(nil, 50); err == nil {
 		t.Fatal("empty batch should be rejected")

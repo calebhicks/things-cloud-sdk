@@ -138,21 +138,47 @@ func defaultExtension() WireExtension {
 
 func generateUUID() string {
 	u := uuid.New()
-	// Base58 alphabet (Bitcoin/Flickr): no 0, O, I, l
-	const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 	n := new(big.Int).SetBytes(u[:])
 	base := big.NewInt(58)
 	mod := new(big.Int)
 	var encoded []byte
 	for n.Sign() > 0 {
 		n.DivMod(n, base, mod)
-		encoded = append(encoded, alphabet[mod.Int64()])
+		encoded = append(encoded, base58Alphabet[mod.Int64()])
 	}
 	// Reverse (big-endian)
 	for i, j := 0, len(encoded)-1; i < j; i, j = i+1, j-1 {
 		encoded[i], encoded[j] = encoded[j], encoded[i]
 	}
 	return string(encoded)
+}
+
+// base58Alphabet is the Bitcoin/Flickr Base58 alphabet: no 0, O, I, l.
+const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+// isThingsBase58UUID reports whether a caller-supplied UUID is one that
+// Things clients can decode: 21-22 characters of the Base58 alphabet whose
+// value fits in 128 bits. Things.app decodes every UUID key in the sync
+// history with BSIdentifierFromBase58String; a key that fails to decode
+// poisons the whole history (see docs/client-side-bugs.md). An alphabet check
+// alone is not enough because a 22-character string can decode to more than
+// 2^128 and still fail inside the client.
+func isThingsBase58UUID(s string) bool {
+	if len(s) < 21 || len(s) > 22 {
+		return false
+	}
+	n := new(big.Int)
+	base := big.NewInt(58)
+	digit := new(big.Int)
+	for _, r := range s {
+		idx := strings.IndexRune(base58Alphabet, r)
+		if idx < 0 {
+			return false
+		}
+		n.Mul(n, base)
+		n.Add(n, digit.SetInt64(int64(idx)))
+	}
+	return n.BitLen() <= 128
 }
 
 func nowTs() float64 {
@@ -1483,6 +1509,8 @@ func cmdCreate(history *thingscloud.History, args []string) {
 	taskUUID := opts["uuid"]
 	if taskUUID == "" {
 		taskUUID = generateUUID()
+	} else if !isThingsBase58UUID(taskUUID) {
+		fatalf("--uuid must be a Things-compatible Base58 UUID (21-22 Base58 characters decoding to at most 128 bits)")
 	}
 
 	payload, err := newTaskCreatePayloadWithRepeat(title, opts)
@@ -1856,6 +1884,8 @@ func buildBatchCreate(op BatchOp) (thingscloud.Identifiable, map[string]string, 
 	taskUUID := op.UUID
 	if taskUUID == "" {
 		taskUUID = generateUUID()
+	} else if !isThingsBase58UUID(taskUUID) {
+		return nil, nil, fmt.Errorf("create uuid must be a Things-compatible Base58 UUID (21-22 Base58 characters decoding to at most 128 bits)")
 	}
 
 	// Convert BatchOp to opts map for newTaskCreatePayload
