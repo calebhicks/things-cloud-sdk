@@ -113,7 +113,7 @@ func (s *mcpServer) handle(req rpcRequest) (rpcResponse, bool) {
 					"title":   "Things Cloud SDK MCP",
 					"version": serverVersion,
 				},
-				"instructions": "Use these tools to read and safely update Things Cloud tasks. Destructive actions should be confirmed by the host application.",
+				"instructions": "Read and safely update the user's Things workspace. Capture new items to the inbox, then organize: projects are finishable outcomes named as such, areas hold ongoing responsibilities, tags are small cross-cutting filters. Set a deadline only for a real external due date; use a start date to plan the work. The Today list is the human's curated plan for the day — prefer inbox or anytime and leave Today to them. Preview writes with dry_run first; destructive actions need host confirmation.",
 			},
 		}, true
 	case "notifications/initialized":
@@ -150,7 +150,7 @@ func tools() []toolDefinition {
 			InputSchema: objectSchema(map[string]any{
 				"view": map[string]any{
 					"type":        "string",
-					"description": "Task view to list.",
+					"description": "Task view to list. \"today\" is the human's curated day plan; \"upcoming\" holds tasks hibernated until their start date; \"someday\" holds deliberately uncommitted items.",
 					"enum":        []string{"all", "today", "inbox", "anytime", "someday", "upcoming"},
 				},
 				"limit": map[string]any{
@@ -191,7 +191,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "create_task",
 			Title:       "Create Task",
-			Description: "Create a Things task. Supports when values inbox, today, anytime, and someday.",
+			Description: "Create a Things task. New captures belong in the inbox (default) until the human triages them; use anytime for work already committed to.",
 			InputSchema: objectSchema(map[string]any{
 				"title": map[string]any{
 					"type":        "string",
@@ -201,24 +201,16 @@ func tools() []toolDefinition {
 					"type":        "string",
 					"description": "Optional task note.",
 				},
-				"when": map[string]any{
-					"type":        "string",
-					"description": "Schedule bucket.",
-					"enum":        []string{"inbox", "today", "anytime", "someday"},
-				},
-				"scheduled": stringProp("Scheduled (start) date as YYYY-MM-DD."),
-				"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
+				"when":      whenProp(),
+				"scheduled": scheduledProp(),
+				"deadline":  deadlineProp(),
 				"project":   stringProp("Project UUID to create the task in."),
 				"area":      stringProp("Area UUID to create the task in."),
 				"heading":   stringProp("Heading UUID to create the task under."),
-				"tags": map[string]any{
-					"type":        "array",
-					"description": "Tag UUIDs.",
-					"items":       map[string]any{"type": "string"},
-				},
+				"tags":      tagsProp(""),
 				"checklist": map[string]any{
 					"type":        "array",
-					"description": "Checklist item titles to create with the task.",
+					"description": "Checklist item titles: sub-steps of this single to-do. If the steps need their own dates or owners, create a project with separate tasks instead.",
 					"items":       map[string]any{"type": "string"},
 				},
 				"uuid": stringProp("Optional caller-supplied Things Base58 task UUID; generated when omitted."),
@@ -231,7 +223,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "create_project",
 			Title:       "Create Project",
-			Description: "Create a Things project, optionally inside an area.",
+			Description: "Create a Things project: a finishable multi-step OUTCOME, named as one (e.g. \"Launch the fall newsletter\"). Ongoing responsibilities (\"keep X healthy\") belong in an area, not a project — a project that can never be checked off is misfiled.",
 			InputSchema: objectSchema(map[string]any{
 				"title":   stringProp("Project title."),
 				"note":    stringProp("Optional project note."),
@@ -252,7 +244,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "create_area",
 			Title:       "Create Area",
-			Description: "Create a Things area.",
+			Description: "Create a Things area: an ongoing sphere of responsibility that is never finished (Health, Finances, Team). Finishable outcomes belong in projects instead.",
 			InputSchema: objectSchema(map[string]any{
 				"title": stringProp("Area title."),
 				"tags": map[string]any{
@@ -266,7 +258,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "create_tag",
 			Title:       "Create Tag",
-			Description: "Create a Things tag.",
+			Description: "Create a Things tag: a cross-cutting filter such as a person, place, or energy level. Keep the tag set small — a tag earns its existence only if someone filters by it on a recurring basis; prefer reusing existing tags.",
 			InputSchema: objectSchema(map[string]any{
 				"title":     stringProp("Tag title."),
 				"shorthand": stringProp("Optional one-key shorthand."),
@@ -297,18 +289,14 @@ func tools() []toolDefinition {
 				"uuid":      stringProp("Task UUID."),
 				"title":     stringProp("New task title."),
 				"note":      stringProp("New task note."),
-				"when":      enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
-				"scheduled": stringProp("Scheduled (start) date as YYYY-MM-DD."),
-				"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
+				"when":      whenProp(),
+				"scheduled": scheduledProp(),
+				"deadline":  deadlineProp(),
 				"project":   stringProp("Project UUID to file the task in."),
 				"area":      stringProp("Area UUID to file the task in."),
 				"heading":   stringProp("Heading UUID to file the task under."),
-				"tags": map[string]any{
-					"type":        "array",
-					"description": "Tag UUIDs. Replaces the task's whole tag set.",
-					"items":       map[string]any{"type": "string"},
-				},
-				"dry_run": dryRunProp(),
+				"tags":      tagsProp("Replaces the task's whole tag set. "),
+				"dry_run":   dryRunProp(),
 			}, []string{"uuid"}),
 		},
 		{
@@ -328,18 +316,14 @@ func tools() []toolDefinition {
 							"uuid":      stringProp("Task UUID. Optional for create (generated when omitted), required otherwise."),
 							"title":     stringProp("Task title. Required for create."),
 							"note":      stringProp("Task note."),
-							"when":      enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
-							"scheduled": stringProp("Scheduled date as YYYY-MM-DD."),
-							"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
-							"tags": map[string]any{
-								"type":        "array",
-								"description": "Tag UUIDs for create or edit. Replaces the task's whole tag set.",
-								"items":       map[string]any{"type": "string"},
-							},
-							"project": stringProp("Project UUID for create, edit, or move-to-project."),
-							"area":    stringProp("Area UUID for create, edit, or move-to-area."),
-							"heading": stringProp("Heading UUID for create or edit."),
-							"type":    enumProp("Item type for create.", []string{"task", "project", "heading"}),
+							"when":      whenProp(),
+							"scheduled": scheduledProp(),
+							"deadline":  deadlineProp(),
+							"tags":      tagsProp("For create or edit; edit replaces the task's whole tag set. "),
+							"project":   stringProp("Project UUID for create, edit, or move-to-project."),
+							"area":      stringProp("Area UUID for create, edit, or move-to-area."),
+							"heading":   stringProp("Heading UUID for create or edit."),
+							"type":      enumProp("Item type for create.", []string{"task", "project", "heading"}),
 						},
 						"required":             []string{"cmd"},
 						"additionalProperties": false,
@@ -369,7 +353,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "move_task",
 			Title:       "Move Task",
-			Description: "Move a task to a project, an area, or the inbox. Optionally place it under a heading when moving to a project.",
+			Description: "Move a task to a project, an area, or back to the inbox, optionally under a heading when moving to a project. Moving to a container commits the task (it leaves the inbox); use edit_task when=someday/anytime for the commitment boundary between parked and actionable.",
 			InputSchema: objectSchema(map[string]any{
 				"uuid":    stringProp("Task UUID."),
 				"project": stringProp("Destination project UUID."),
@@ -382,7 +366,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "move_task_to_today",
 			Title:       "Move Task To Today",
-			Description: "Schedule a task for Today.",
+			Description: "Schedule a task for Today. Today is the human's curated short list of what will actually be worked on — only move tasks there on the human's explicit request.",
 			InputSchema: objectSchema(map[string]any{
 				"uuid":    stringProp("Task UUID."),
 				"dry_run": dryRunProp(),
@@ -391,7 +375,7 @@ func tools() []toolDefinition {
 		{
 			Name:        "add_checklist",
 			Title:       "Add Checklist Items",
-			Description: "Add checklist items to a task.",
+			Description: "Add checklist items to a task: sub-steps of a single to-do. If the steps need their own dates or owners, it should be a project with separate tasks instead.",
 			InputSchema: objectSchema(map[string]any{
 				"uuid": stringProp("Task UUID."),
 				"items": map[string]any{
@@ -439,6 +423,28 @@ func enumProp(description string, values []string) map[string]any {
 
 func dryRunProp() map[string]any {
 	return map[string]any{"type": "boolean", "description": "Build and return the payload without writing to Things Cloud."}
+}
+
+// whenProp carries Things' own start-list semantics so hosts schedule tasks
+// the way the app means them.
+func whenProp() map[string]any {
+	return enumProp("Schedule bucket. \"inbox\" = captured but not yet triaged or committed; \"anytime\" = committed and actionable now; \"someday\" = deliberately not committed, may be discarded later (moving between someday and anytime is the commitment boundary); \"today\" = the human's curated short list of what will actually be worked on today. Prefer inbox or anytime and leave Today curation to the human.", []string{"inbox", "today", "anytime", "someday"})
+}
+
+func scheduledProp() map[string]any {
+	return stringProp("Start date as YYYY-MM-DD. A future date hibernates the task in Upcoming until that date, when it surfaces automatically. To plan work toward a deadline, set a start date several days before it.")
+}
+
+func deadlineProp() map[string]any {
+	return stringProp("Deadline as YYYY-MM-DD. Only for real external due dates with consequences for missing them — never a priority flag, never a reminder. Use a start date (scheduled) to plan the work itself.")
+}
+
+func tagsProp(context string) map[string]any {
+	return map[string]any{
+		"type":        "array",
+		"description": "Tag UUIDs. " + context + "Tags are cross-cutting filters (person, place, energy level); keep the tag set small and prefer existing tags.",
+		"items":       map[string]any{"type": "string"},
+	}
 }
 
 func limitProp() map[string]any {

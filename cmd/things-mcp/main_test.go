@@ -119,6 +119,68 @@ func TestListTasksUsesStateCacheAcrossCalls(t *testing.T) {
 	}
 }
 
+func TestDescriptionsCarryMethodologySemantics(t *testing.T) {
+	// The tool surface teaches Things' own methodology as facts about the
+	// app, so any LLM host uses the tools the way Things means them.
+	server := &mcpServer{}
+	resp, ok := server.handle(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "initialize"})
+	if !ok {
+		t.Fatal("initialize did not produce a response")
+	}
+	instructions := resp.Result.(map[string]any)["instructions"].(string)
+	for _, want := range []string{"inbox", "finishable outcomes", "ongoing responsibilities", "real external due date", "curated", "dry_run"} {
+		if !strings.Contains(instructions, want) {
+			t.Fatalf("instructions missing %q: %s", want, instructions)
+		}
+	}
+
+	byName := map[string]toolDefinition{}
+	for _, tool := range tools() {
+		byName[tool.Name] = tool
+	}
+	assertContains := func(name, where, text string, wants ...string) {
+		t.Helper()
+		for _, want := range wants {
+			if !strings.Contains(strings.ToLower(text), strings.ToLower(want)) {
+				t.Fatalf("%s %s missing %q: %s", name, where, want, text)
+			}
+		}
+	}
+	propDesc := func(name, prop string) string {
+		t.Helper()
+		props := byName[name].InputSchema["properties"].(map[string]any)
+		p, ok := props[prop].(map[string]any)
+		if !ok {
+			t.Fatalf("%s has no %s property", name, prop)
+		}
+		return p["description"].(string)
+	}
+
+	// when: capture/commitment semantics and the Today rule.
+	assertContains("create_task", "when", propDesc("create_task", "when"),
+		"not yet triaged", "committed and actionable", "deliberately not committed", "commitment boundary", "curated", "leave Today curation to the human")
+	// deadline: real external dates only, never priority.
+	assertContains("edit_task", "deadline", propDesc("edit_task", "deadline"),
+		"external due dates", "never a priority flag", "plan the work")
+	// scheduled: hibernation semantics.
+	assertContains("batch_tasks", "scheduled", propDesc("create_task", "scheduled"),
+		"hibernates", "surfaces automatically", "before it")
+	// project = finishable outcome, not an ongoing responsibility.
+	assertContains("create_project", "description", byName["create_project"].Description,
+		"outcome", "never be checked off", "area")
+	// tags: small cross-cutting filter set.
+	assertContains("create_tag", "description", byName["create_tag"].Description,
+		"cross-cutting", "recurring basis")
+	assertContains("edit_task", "tags", propDesc("edit_task", "tags"),
+		"replaces the task's whole tag set", "cross-cutting")
+	// checklist: sub-steps of one to-do.
+	assertContains("add_checklist", "description", byName["add_checklist"].Description,
+		"sub-steps", "project")
+	// Today curation on the today-mover.
+	assertContains("move_task_to_today", "description", byName["move_task_to_today"].Description,
+		"curated", "explicit request")
+}
+
 func TestGetTaskAndContainerFilters(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
