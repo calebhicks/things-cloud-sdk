@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	thingscloud "github.com/pdurlej/things-cloud-sdk"
 	"github.com/pdurlej/things-cloud-sdk/internal/config"
+	"github.com/pdurlej/things-cloud-sdk/internal/thingscli"
 	memory "github.com/pdurlej/things-cloud-sdk/state/memory"
 )
 
@@ -482,26 +484,25 @@ func (s *mcpServer) ensureCloud() error {
 	return nil
 }
 
+// mcpStateCachePath resolves the MCP state cache location with the same
+// config `cache` key semantics as the CLI: an explicit config path wins, and
+// the default lives next to the CLI's things-cli-state.json.
+func mcpStateCachePath() string {
+	cfg, err := config.Load()
+	if err == nil && cfg.Cache != "" {
+		return cfg.Cache
+	}
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "things-cloud-sdk", "things-mcp-state.json")
+	}
+	return filepath.Join(os.TempDir(), "things-cloud-sdk", "things-mcp-state.json")
+}
+
 func (s *mcpServer) loadState() (*memory.State, error) {
 	if err := s.ensureCloud(); err != nil {
 		return nil, err
 	}
-	state := memory.NewState()
-	startIndex := 0
-	for {
-		items, hasMore, err := s.history.Items(thingscloud.ItemsOptions{StartIndex: startIndex})
-		if err != nil {
-			return nil, fmt.Errorf("fetch items: %w", err)
-		}
-		if err := state.Update(items...); err != nil {
-			return nil, fmt.Errorf("update state: %w", err)
-		}
-		startIndex = s.history.LoadedServerIndex
-		if !hasMore {
-			break
-		}
-	}
-	return state, nil
+	return thingscli.LoadStateWithCache(s.client, s.history, mcpStateCachePath())
 }
 
 type simpleTask struct {

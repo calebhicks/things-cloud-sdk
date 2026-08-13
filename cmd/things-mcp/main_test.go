@@ -55,6 +55,73 @@ func TestEnsureCloudDoesNotDuplicateVerify(t *testing.T) {
 	}
 }
 
+func TestListTasksUsesStateCacheAcrossCalls(t *testing.T) {
+	var itemsRequests int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/account/test@example.com":
+			fmt.Fprint(w, `{"email":"test@example.com","history-key":"history-id","status":"SYAccountStatusActive"}`)
+		case "/version/1/history/history-id":
+			fmt.Fprint(w, `{"latest-server-index":1,"latest-schema-version":301}`)
+		case "/version/1/history/history-id/items":
+			itemsRequests++
+			if got := r.URL.Query().Get("start-index"); got != "0" {
+				t.Errorf("start-index = %s, want 0", got)
+			}
+			fmt.Fprint(w, `{"items":[{"task-1":{"e":"Task6","t":0,"p":{"tt":"Alpha","tp":0,"st":1,"ss":0}}}],"current-item-index":1,"schema":301}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	setHermeticConfig(t)
+	t.Setenv("THINGS_CLI_CACHE", filepath.Join(t.TempDir(), "mcp-state.json"))
+	server := &mcpServer{endpoint: ts.URL}
+
+	assertAlpha := func(result toolResult, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("listTasks failed: %v", err)
+		}
+		if result.IsError {
+			t.Fatalf("listTasks returned tool error: %#v", result)
+		}
+		var tasks []struct {
+			UUID  string `json:"uuid"`
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &tasks); err != nil {
+			t.Fatalf("unmarshal tasks: %v", err)
+		}
+		if len(tasks) != 1 || tasks[0].UUID != "task-1" || tasks[0].Title != "Alpha" {
+			t.Fatalf("tasks = %#v, want task-1 Alpha", tasks)
+		}
+	}
+
+	assertAlpha(server.listTasks("all", "", 0))
+	if itemsRequests != 1 {
+		t.Fatalf("items requests after first read = %d, want 1", itemsRequests)
+	}
+
+	// The cursor is cached at the server head, so repeated reads must not
+	// replay history.
+	assertAlpha(server.listTasks("all", "", 0))
+	if itemsRequests != 1 {
+		t.Fatalf("items requests after second read = %d, want 1 (no replay)", itemsRequests)
+	}
+
+	// An empty view still serializes as a JSON array.
+	result, err := server.listTasks("today", "", 0)
+	if err != nil {
+		t.Fatalf("listTasks today failed: %v", err)
+	}
+	if result.Content[0].Text != "[]" {
+		t.Fatalf("empty view serialized as %q, want []", result.Content[0].Text)
+	}
+}
+
 func TestToolJSONEmptySliceSerializesAsArray(t *testing.T) {
 	// contracts.md documents every MCP list result as a JSON array. The list
 	// functions must initialize empty slices so empty results serialize as []

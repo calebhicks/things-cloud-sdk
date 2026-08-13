@@ -2,14 +2,143 @@ package thingscli
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	thingscloud "github.com/pdurlej/things-cloud-sdk"
 	memory "github.com/pdurlej/things-cloud-sdk/state/memory"
 )
+
+func TestLoadStateWithCacheFetchesOnlyNewItems(t *testing.T) {
+	var itemsStartIndexes []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/history/history-id":
+			fmt.Fprint(w, `{"latest-server-index":1,"latest-schema-version":301}`)
+		case "/version/1/history/history-id/items":
+			itemsStartIndexes = append(itemsStartIndexes, r.URL.Query().Get("start-index"))
+			fmt.Fprint(w, `{"items":[{"task-1":{"e":"Task6","t":0,"p":{"tt":"Alpha","tp":0,"st":1,"ss":0}}}],"current-item-index":1,"schema":301}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := thingscloud.New(ts.URL, "test@example.com", "secret")
+	cachePath := filepath.Join(t.TempDir(), "state.json")
+
+	state, err := LoadStateWithCache(client, client.HistoryWithID("history-id"), cachePath)
+	if err != nil {
+		t.Fatalf("first load failed: %v", err)
+	}
+	if len(state.Tasks) != 1 || state.Tasks["task-1"] == nil {
+		t.Fatalf("tasks = %#v, want task-1", state.Tasks)
+	}
+	if len(itemsStartIndexes) != 1 || itemsStartIndexes[0] != "0" {
+		t.Fatalf("items requests = %v, want one request from index 0", itemsStartIndexes)
+	}
+
+	// The cursor is now persisted at the server head, so a second load must
+	// not fetch items again.
+	state, err = LoadStateWithCache(client, client.HistoryWithID("history-id"), cachePath)
+	if err != nil {
+		t.Fatalf("second load failed: %v", err)
+	}
+	if len(state.Tasks) != 1 {
+		t.Fatalf("cached tasks = %#v, want task-1", state.Tasks)
+	}
+	if len(itemsStartIndexes) != 1 {
+		t.Fatalf("items requests = %v, want no refetch on cached load", itemsStartIndexes)
+	}
+}
+
+func TestLoadStateWithCacheResetsWhenCursorAheadOfServer(t *testing.T) {
+	var itemsStartIndexes []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/history/history-id":
+			fmt.Fprint(w, `{"latest-server-index":1,"latest-schema-version":301}`)
+		case "/version/1/history/history-id/items":
+			itemsStartIndexes = append(itemsStartIndexes, r.URL.Query().Get("start-index"))
+			fmt.Fprint(w, `{"items":[{"task-1":{"e":"Task6","t":0,"p":{"tt":"Alpha","tp":0,"st":1,"ss":0}}}],"current-item-index":1,"schema":301}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := thingscloud.New(ts.URL, "test@example.com", "secret")
+	cachePath := filepath.Join(t.TempDir(), "state.json")
+	if err := saveCLIStateCache(cachePath, &cliStateCache{
+		HistoryID:   "history-id",
+		ServerIndex: 5,
+		State:       memory.NewState(),
+	}); err != nil {
+		t.Fatalf("seed stale cache: %v", err)
+	}
+
+	state, err := LoadStateWithCache(client, client.HistoryWithID("history-id"), cachePath)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if len(itemsStartIndexes) != 1 || itemsStartIndexes[0] != "0" {
+		t.Fatalf("items requests = %v, want a full replay from index 0", itemsStartIndexes)
+	}
+	if len(state.Tasks) != 1 || state.Tasks["task-1"] == nil {
+		t.Fatalf("tasks = %#v, want task-1 after reset", state.Tasks)
+	}
+
+	cache, err := loadCLIStateCache(cachePath)
+	if err != nil {
+		t.Fatalf("reload cache: %v", err)
+	}
+	if cache.ServerIndex != 1 {
+		t.Fatalf("cache server index = %d, want 1", cache.ServerIndex)
+	}
+}
+
+func TestSaveCLIStateCacheIsAtomicAndPrivate(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "state.json")
+	if err := saveCLIStateCache(cachePath, &cliStateCache{
+		HistoryID:   "history-id",
+		ServerIndex: 3,
+		State:       memory.NewState(),
+	}); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	info, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatalf("stat cache: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("cache mode = %v, want 0600", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp-") {
+			t.Fatalf("temporary file left behind: %s", entry.Name())
+		}
+	}
+	cache, err := loadCLIStateCache(cachePath)
+	if err != nil {
+		t.Fatalf("reload cache: %v", err)
+	}
+	if cache.HistoryID != "history-id" || cache.ServerIndex != 3 {
+		t.Fatalf("cache = %#v, want history-id at index 3", cache)
+	}
+}
 
 func requirePayloadMap(t *testing.T, env any) map[string]any {
 	t.Helper()

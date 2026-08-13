@@ -822,14 +822,42 @@ func normalizeMemoryState(state *memory.State) {
 }
 
 func saveCLIStateCache(path string, cache *cliStateCache) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	bs, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, bs, 0o600)
+	// Write to a temporary file and rename so a crash mid-write cannot leave
+	// truncated JSON behind; a corrupt cache would otherwise fail every
+	// subsequent load instead of self-healing by replay.
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func(err error) error {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return cleanup(err)
+	}
+	if _, err := tmp.Write(bs); err != nil {
+		return cleanup(err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 func initCLI(syncHistoryHead bool) *cliContext {
@@ -866,29 +894,29 @@ func initCLI(syncHistoryHead bool) *cliContext {
 	return &cliContext{client: c, history: history}
 }
 
-func (ctx *cliContext) serverIndex() int {
-	history, err := ctx.client.History(ctx.history.ID)
-	if err != nil {
-		fatal("get server index", err)
-	}
-	return history.LatestServerIndex
-}
-
-func (ctx *cliContext) loadState() *memory.State {
-	cachePath := cliStateCachePath()
+// LoadStateWithCache materializes Things state using the JSON state cache at
+// cachePath. It fetches only history items newer than the cached cursor,
+// resets to a full replay when the cached cursor is ahead of the server head,
+// and saves the refreshed cache before returning. Both the CLI and the MCP
+// server share this loop; they differ only in the cache path they pass.
+func LoadStateWithCache(client *thingscloud.Client, history *thingscloud.History, cachePath string) (*memory.State, error) {
 	cache, err := loadCLIStateCache(cachePath)
 	if err != nil {
-		fatal("load state cache", err)
+		return nil, fmt.Errorf("load state cache: %w", err)
 	}
 
 	state := memory.NewState()
 	startIndex := 0
-	if cache != nil && cache.HistoryID == ctx.history.ID {
+	if cache != nil && cache.HistoryID == history.ID {
 		state = cache.State
 		startIndex = cache.ServerIndex
 	}
 
-	latestServerIndex := ctx.serverIndex()
+	head, err := client.History(history.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get server index: %w", err)
+	}
+	latestServerIndex := head.LatestServerIndex
 	if startIndex > latestServerIndex {
 		state = memory.NewState()
 		startIndex = 0
@@ -898,28 +926,36 @@ func (ctx *cliContext) loadState() *memory.State {
 		if startIndex >= latestServerIndex {
 			break
 		}
-		ctx.history.LoadedServerIndex = startIndex
-		items, hasMore, err := ctx.history.Items(thingscloud.ItemsOptions{StartIndex: startIndex})
+		history.LoadedServerIndex = startIndex
+		items, hasMore, err := history.Items(thingscloud.ItemsOptions{StartIndex: startIndex})
 		if err != nil {
-			fatal("fetch items", err)
+			return nil, fmt.Errorf("fetch items: %w", err)
 		}
 		if err := state.Update(items...); err != nil {
-			fatal("update state", err)
+			return nil, fmt.Errorf("update state: %w", err)
 		}
-		startIndex = ctx.history.LoadedServerIndex
+		startIndex = history.LoadedServerIndex
 		if !hasMore {
 			break
 		}
 	}
 
 	if err := saveCLIStateCache(cachePath, &cliStateCache{
-		HistoryID:   ctx.history.ID,
+		HistoryID:   history.ID,
 		ServerIndex: startIndex,
 		State:       state,
 	}); err != nil {
-		fatal("save state cache", err)
+		return nil, fmt.Errorf("save state cache: %w", err)
 	}
 
+	return state, nil
+}
+
+func (ctx *cliContext) loadState() *memory.State {
+	state, err := LoadStateWithCache(ctx.client, ctx.history, cliStateCachePath())
+	if err != nil {
+		fatal("load state", err)
+	}
 	return state
 }
 
