@@ -2,8 +2,58 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+// setHermeticConfig points the server at a throwaway config file and clears
+// ambient Things credentials. config.ApplyEnv lets THINGS_USERNAME,
+// THINGS_PASSWORD, and THINGS_TOKEN override the config file, so a shell that
+// exports real credentials would otherwise redirect these tests at a real
+// account name.
+func setHermeticConfig(t *testing.T) {
+	t.Helper()
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"username":"test@example.com","password":"secret"}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("THINGS_CONFIG", cfgPath)
+	t.Setenv("THINGS_USERNAME", "")
+	t.Setenv("THINGS_PASSWORD", "")
+	t.Setenv("THINGS_TOKEN", "")
+	t.Setenv("THINGS_CLI_CACHE", "")
+}
+
+func TestEnsureCloudDoesNotDuplicateVerify(t *testing.T) {
+	var verifies int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/account/test@example.com":
+			verifies++
+			fmt.Fprint(w, `{"email":"test@example.com","history-key":"history-id","status":"SYAccountStatusActive"}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	setHermeticConfig(t)
+	server := &mcpServer{endpoint: ts.URL}
+	if err := server.ensureCloud(); err != nil {
+		t.Fatalf("ensureCloud failed: %v", err)
+	}
+	if verifies != 1 {
+		t.Fatalf("verify requests = %d, want 1", verifies)
+	}
+	if server.history == nil || server.history.ID != "history-id" {
+		t.Fatalf("history = %#v, want history-id", server.history)
+	}
+}
 
 func TestToolJSONEmptySliceSerializesAsArray(t *testing.T) {
 	// contracts.md documents every MCP list result as a JSON array. The list

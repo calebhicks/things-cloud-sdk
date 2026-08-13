@@ -60,6 +60,8 @@ type toolDefinition struct {
 type mcpServer struct {
 	client  *thingscloud.Client
 	history *thingscloud.History
+	// endpoint overrides thingscloud.APIEndpoint in tests.
+	endpoint string
 }
 
 func main() {
@@ -461,16 +463,19 @@ func (s *mcpServer) ensureCloud() error {
 	if cfg.Username == "" || cfg.Password == "" {
 		return fmt.Errorf("THINGS_USERNAME/THINGS_PASSWORD or config username/password are required")
 	}
-	client := thingscloud.New(thingscloud.APIEndpoint, cfg.Username, cfg.Password)
+	endpoint := s.endpoint
+	if endpoint == "" {
+		endpoint = thingscloud.APIEndpoint
+	}
+	client := thingscloud.New(endpoint, cfg.Username, cfg.Password)
 	if os.Getenv("THINGS_DEBUG") != "" {
 		client.Debug = true
 	}
-	if _, err := client.Verify(); err != nil {
-		return fmt.Errorf("login: %w", err)
-	}
+	// OwnHistory calls Verify internally, so a separate Verify call here
+	// would send a second account request on every cold start.
 	history, err := client.OwnHistory()
 	if err != nil {
-		return fmt.Errorf("get history: %w", err)
+		return fmt.Errorf("login: %w", err)
 	}
 	s.client = client
 	s.history = history
