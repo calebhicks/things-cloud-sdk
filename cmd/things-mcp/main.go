@@ -14,6 +14,7 @@ import (
 	"time"
 
 	thingscloud "github.com/arthursoares/things-cloud-sdk"
+	memory "github.com/arthursoares/things-cloud-sdk/state/memory"
 )
 
 const protocolVersion = "2025-06-18"
@@ -158,7 +159,17 @@ func tools() []toolDefinition {
 					"minimum":     1,
 					"maximum":     200,
 				},
+				"area":    stringProp("Only tasks in the area with this title (case-insensitive)."),
+				"project": stringProp("Only tasks in the project with this title (case-insensitive)."),
 			}, nil),
+		},
+		{
+			Name:        "get_task",
+			Title:       "Get Task",
+			Description: "Show one task in full detail (note, schedule, dates, containers) by UUID or unique UUID prefix.",
+			InputSchema: objectSchema(map[string]any{
+				"uuid": stringProp("Task UUID or UUID prefix."),
+			}, []string{"uuid"}),
 		},
 		{
 			Name:        "search_tasks",
@@ -465,13 +476,23 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 	switch params.Name {
 	case "list_tasks":
 		var args struct {
-			View  string `json:"view"`
-			Limit int    `json:"limit"`
+			View    string `json:"view"`
+			Limit   int    `json:"limit"`
+			Area    string `json:"area"`
+			Project string `json:"project"`
 		}
-		if err := decodeArgs(params.Arguments, &args); err != nil {
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
 			return toolResult{}, err
 		}
-		return s.listTasks(args.View, "", args.Limit)
+		return s.listTasks(args.View, "", args.Area, args.Project, args.Limit)
+	case "get_task":
+		var args struct {
+			UUID string `json:"uuid"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.getTask(args.UUID)
 	case "search_tasks":
 		var args struct {
 			Query string `json:"query"`
@@ -483,7 +504,7 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 		if strings.TrimSpace(args.Query) == "" {
 			return toolResult{}, fmt.Errorf("query is required")
 		}
-		return s.listTasks("all", args.Query, args.Limit)
+		return s.listTasks("all", args.Query, "", "", args.Limit)
 	case "create_task":
 		var args createTaskArgs
 		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
@@ -699,13 +720,27 @@ type simpleTask struct {
 	DeadlineDate  *string `json:"deadlineDate,omitempty"`
 }
 
-func (s *mcpServer) listTasks(view, query string, limit int) (toolResult, error) {
+func (s *mcpServer) listTasks(view, query, areaName, projectName string, limit int) (toolResult, error) {
 	state, err := s.loadState()
 	if err != nil {
 		return toolError(err), nil
 	}
 	if view == "" {
 		view = "all"
+	}
+	// Same convention as the CLI list --area/--project filters: match the
+	// container by case-insensitive title, and fail when it does not exist.
+	areaFilter := ""
+	if areaName != "" {
+		if areaFilter = findAreaUUIDByTitle(state, areaName); areaFilter == "" {
+			return toolError(fmt.Errorf("area not found: %s", areaName)), nil
+		}
+	}
+	projectFilter := ""
+	if projectName != "" {
+		if projectFilter = findProjectUUIDByTitle(state, projectName); projectFilter == "" {
+			return toolError(fmt.Errorf("project not found: %s", projectName)), nil
+		}
 	}
 	query = strings.ToLower(strings.TrimSpace(query))
 	now := time.Now().UTC()
@@ -720,6 +755,12 @@ func (s *mcpServer) listTasks(view, query string, limit int) (toolResult, error)
 			continue
 		}
 		if query != "" && !strings.Contains(strings.ToLower(task.Title), query) && !strings.Contains(strings.ToLower(task.Note), query) {
+			continue
+		}
+		if areaFilter != "" && !containsStr(task.AreaIDs, areaFilter) {
+			continue
+		}
+		if projectFilter != "" && !containsStr(task.ParentTaskIDs, projectFilter) {
 			continue
 		}
 		tasks = append(tasks, toSimpleTask(task, now, tomorrowStart))
@@ -737,6 +778,86 @@ func (s *mcpServer) listTasks(view, query string, limit int) (toolResult, error)
 		tasks = tasks[:limit]
 	}
 	return toolJSON(tasks), nil
+}
+
+// fullTask is the CLI show command's TaskOutput shape.
+type fullTask struct {
+	UUID          string   `json:"uuid"`
+	Title         string   `json:"title"`
+	Note          string   `json:"note,omitempty"`
+	Status        int      `json:"status"`
+	InTrash       bool     `json:"inTrash"`
+	IsProject     bool     `json:"isProject"`
+	Schedule      int      `json:"schedule"`
+	ScheduledDate *string  `json:"scheduledDate,omitempty"`
+	DeadlineDate  *string  `json:"deadlineDate,omitempty"`
+	AreaIDs       []string `json:"areaIds,omitempty"`
+	ParentIDs     []string `json:"parentIds,omitempty"`
+}
+
+// getTask mirrors the CLI show command, including its UUID-prefix match.
+func (s *mcpServer) getTask(uuid string) (toolResult, error) {
+	uuid = strings.TrimSpace(uuid)
+	if uuid == "" {
+		return toolResult{}, fmt.Errorf("uuid is required")
+	}
+	state, err := s.loadState()
+	if err != nil {
+		return toolError(err), nil
+	}
+	for _, task := range state.Tasks {
+		if !strings.HasPrefix(task.UUID, uuid) {
+			continue
+		}
+		out := fullTask{
+			UUID:      task.UUID,
+			Title:     task.Title,
+			Note:      task.Note,
+			Status:    int(task.Status),
+			InTrash:   task.InTrash,
+			IsProject: task.Type == thingscloud.TaskTypeProject,
+			Schedule:  int(task.Schedule),
+			AreaIDs:   task.AreaIDs,
+			ParentIDs: task.ParentTaskIDs,
+		}
+		if task.ScheduledDate != nil {
+			d := task.ScheduledDate.Format("2006-01-02")
+			out.ScheduledDate = &d
+		}
+		if task.DeadlineDate != nil {
+			d := task.DeadlineDate.Format("2006-01-02")
+			out.DeadlineDate = &d
+		}
+		return toolJSON(out), nil
+	}
+	return toolError(fmt.Errorf("task not found: %s", uuid)), nil
+}
+
+func findAreaUUIDByTitle(state *memory.State, name string) string {
+	for _, area := range state.Areas {
+		if strings.EqualFold(area.Title, name) {
+			return area.UUID
+		}
+	}
+	return ""
+}
+
+func findProjectUUIDByTitle(state *memory.State, name string) string {
+	for _, task := range state.Tasks {
+		if task.Type == thingscloud.TaskTypeProject && strings.EqualFold(task.Title, name) {
+			return task.UUID
+		}
+	}
+	return ""
+}
+
+func containsStr(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 type simpleProject struct {

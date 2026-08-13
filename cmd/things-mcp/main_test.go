@@ -97,25 +97,105 @@ func TestListTasksUsesStateCacheAcrossCalls(t *testing.T) {
 		}
 	}
 
-	assertAlpha(server.listTasks("all", "", 0))
+	assertAlpha(server.listTasks("all", "", "", "", 0))
 	if itemsRequests != 1 {
 		t.Fatalf("items requests after first read = %d, want 1", itemsRequests)
 	}
 
 	// The cursor is cached at the server head, so repeated reads must not
 	// replay history.
-	assertAlpha(server.listTasks("all", "", 0))
+	assertAlpha(server.listTasks("all", "", "", "", 0))
 	if itemsRequests != 1 {
 		t.Fatalf("items requests after second read = %d, want 1 (no replay)", itemsRequests)
 	}
 
 	// An empty view still serializes as a JSON array.
-	result, err := server.listTasks("today", "", 0)
+	result, err := server.listTasks("today", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("listTasks today failed: %v", err)
 	}
 	if result.Content[0].Text != "[]" {
 		t.Fatalf("empty view serialized as %q, want []", result.Content[0].Text)
+	}
+}
+
+func TestGetTaskAndContainerFilters(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/account/test@example.com":
+			fmt.Fprint(w, `{"email":"test@example.com","history-key":"history-id","status":"SYAccountStatusActive"}`)
+		case "/version/1/history/history-id":
+			fmt.Fprint(w, `{"latest-server-index":4,"latest-schema-version":301}`)
+		case "/version/1/history/history-id/items":
+			fmt.Fprint(w, `{"items":[`+
+				`{"area-1":{"e":"Area3","t":0,"p":{"tt":"Home"}}},`+
+				`{"proj-1":{"e":"Task6","t":0,"p":{"tt":"Renovation","tp":1,"st":1,"ss":0}}},`+
+				`{"task-a":{"e":"Task6","t":0,"p":{"tt":"Paint wall","tp":0,"st":1,"ss":0,"pr":["proj-1"],"nt":{"_t":"tx","ch":0,"v":"two coats","t":1}}}},`+
+				`{"task-b":{"e":"Task6","t":0,"p":{"tt":"Water plants","tp":0,"st":1,"ss":0,"ar":["area-1"]}}}`+
+				`],"current-item-index":4,"schema":301}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	setHermeticEnv(t)
+	server := &mcpServer{endpoint: ts.URL}
+
+	// get_task with a UUID prefix, like the CLI show command.
+	result, err := server.getTask("task-a")
+	if err != nil {
+		t.Fatalf("getTask failed: %v", err)
+	}
+	var task fullTask
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &task); err != nil {
+		t.Fatalf("unmarshal task: %v", err)
+	}
+	if task.UUID != "task-a" || task.Title != "Paint wall" || task.Note != "two coats" {
+		t.Fatalf("task = %+v", task)
+	}
+	if len(task.ParentIDs) != 1 || task.ParentIDs[0] != "proj-1" || task.IsProject {
+		t.Fatalf("task containers = %+v", task)
+	}
+	if r, err := server.getTask("nope"); err != nil || !r.IsError {
+		t.Fatalf("missing task should return a tool error, got %v/%v", r, err)
+	}
+
+	// list_tasks --project filter by case-insensitive title.
+	result, err = server.listTasks("all", "", "", "renovation", 0)
+	if err != nil {
+		t.Fatalf("listTasks project filter failed: %v", err)
+	}
+	var tasks []struct {
+		UUID string `json:"uuid"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &tasks); err != nil {
+		t.Fatalf("unmarshal tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].UUID != "task-a" {
+		t.Fatalf("project filter tasks = %#v, want task-a only", tasks)
+	}
+
+	// list_tasks --area filter.
+	result, err = server.listTasks("all", "", "home", "", 0)
+	if err != nil {
+		t.Fatalf("listTasks area filter failed: %v", err)
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &tasks); err != nil {
+		t.Fatalf("unmarshal tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].UUID != "task-b" {
+		t.Fatalf("area filter tasks = %#v, want task-b only", tasks)
+	}
+
+	// Unknown container names fail like the CLI, instead of silently
+	// returning everything.
+	if r, err := server.listTasks("all", "", "garage", "", 0); err != nil || !r.IsError {
+		t.Fatalf("unknown area should return a tool error, got %v/%v", r, err)
+	}
+	if r, err := server.listTasks("all", "", "", "moon base", 0); err != nil || !r.IsError {
+		t.Fatalf("unknown project should return a tool error, got %v/%v", r, err)
 	}
 }
 
@@ -174,6 +254,7 @@ func TestToolsListIncludesCoreTools(t *testing.T) {
 	}
 	for _, name := range []string{
 		"list_tasks",
+		"get_task",
 		"search_tasks",
 		"create_task",
 		"create_project",
