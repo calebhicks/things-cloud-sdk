@@ -176,6 +176,9 @@ func TestToolsListIncludesCoreTools(t *testing.T) {
 		"search_tasks",
 		"create_task",
 		"create_project",
+		"create_heading",
+		"create_area",
+		"create_tag",
 		"complete_task",
 		"edit_task",
 		"batch_tasks",
@@ -411,6 +414,107 @@ func TestEditTaskFullOptionsFollowCLIConventions(t *testing.T) {
 
 	if _, err := server.editTask(editTaskArgs{UUID: taskUUID, Heading: "bogus", DryRun: true}); err == nil {
 		t.Fatal("non-canonical heading should be rejected")
+	}
+}
+
+func TestCreateHeadingAreaTagFollowCLIConventions(t *testing.T) {
+	server := &mcpServer{}
+	projectUUID := thingscloud.NewUUID()
+	tagUUID := thingscloud.NewUUID()
+	parentTag := thingscloud.NewUUID()
+
+	// Heading: tp=2, structural st=1, inside the project.
+	result, err := server.createHeading("Phase 1", projectUUID, true)
+	if err != nil {
+		t.Fatalf("createHeading failed: %v", err)
+	}
+	var heading struct {
+		UUID string `json:"uuid"`
+		Item struct {
+			E string `json:"e"`
+			P struct {
+				Tp int      `json:"tp"`
+				St int      `json:"st"`
+				Pr []string `json:"pr"`
+			} `json:"p"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &heading); err != nil {
+		t.Fatalf("unmarshal heading: %v", err)
+	}
+	if heading.Item.E != "Task6" || heading.Item.P.Tp != 2 || heading.Item.P.St != 1 {
+		t.Fatalf("heading payload = %+v, want tp=2 st=1", heading.Item.P)
+	}
+	if len(heading.Item.P.Pr) != 1 || heading.Item.P.Pr[0] != projectUUID {
+		t.Fatalf("heading pr = %v, want [%s]", heading.Item.P.Pr, projectUUID)
+	}
+	if err := thingscloud.ValidateUUID(heading.UUID); err != nil {
+		t.Fatalf("heading uuid not canonical: %v", err)
+	}
+	if _, err := server.createHeading("Phase 1", "", true); err == nil {
+		t.Fatal("heading without project should be rejected")
+	}
+
+	// Area: {tt, ix:0, tg, xx} as Area3, exactly the CLI payload.
+	result, err = server.createArea("Home", []string{tagUUID}, true)
+	if err != nil {
+		t.Fatalf("createArea failed: %v", err)
+	}
+	var area struct {
+		Item struct {
+			T int    `json:"t"`
+			E string `json:"e"`
+			P struct {
+				Tt string   `json:"tt"`
+				Ix int      `json:"ix"`
+				Tg []string `json:"tg"`
+			} `json:"p"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &area); err != nil {
+		t.Fatalf("unmarshal area: %v", err)
+	}
+	if area.Item.E != "Area3" || area.Item.T != 0 || area.Item.P.Tt != "Home" || area.Item.P.Ix != 0 {
+		t.Fatalf("area payload = %+v", area.Item)
+	}
+	if len(area.Item.P.Tg) != 1 || area.Item.P.Tg[0] != tagUUID {
+		t.Fatalf("area tg = %v", area.Item.P.Tg)
+	}
+	if _, err := server.createArea("Home", []string{"bogus"}, true); err == nil {
+		t.Fatal("non-canonical area tag should be rejected")
+	}
+
+	// Tag: Tag4 with the CLI's negative ix convention, null shorthand by
+	// default, parent in pn.
+	result, err = server.createTag("@errand", "e", parentTag, true)
+	if err != nil {
+		t.Fatalf("createTag failed: %v", err)
+	}
+	var tag struct {
+		Item struct {
+			E string `json:"e"`
+			P struct {
+				Tt string   `json:"tt"`
+				Ix int      `json:"ix"`
+				Sh *string  `json:"sh"`
+				Pn []string `json:"pn"`
+			} `json:"p"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &tag); err != nil {
+		t.Fatalf("unmarshal tag: %v", err)
+	}
+	if tag.Item.E != "Tag4" || tag.Item.P.Tt != "@errand" {
+		t.Fatalf("tag payload = %+v", tag.Item)
+	}
+	if tag.Item.P.Ix >= 0 {
+		t.Fatalf("tag ix = %d, want negative (Things tag convention)", tag.Item.P.Ix)
+	}
+	if tag.Item.P.Sh == nil || *tag.Item.P.Sh != "e" || len(tag.Item.P.Pn) != 1 || tag.Item.P.Pn[0] != parentTag {
+		t.Fatalf("tag sh/pn = %v/%v", tag.Item.P.Sh, tag.Item.P.Pn)
+	}
+	if _, err := server.createTag("@errand", "", "bogus", true); err == nil {
+		t.Fatal("non-canonical parent tag should be rejected")
 	}
 }
 

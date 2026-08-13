@@ -129,6 +129,14 @@ type taskCreatePayload struct {
 	Xx   wireExtension    `json:"xx"`
 }
 
+type tagCreatePayload struct {
+	Tt string        `json:"tt"`
+	Ix int           `json:"ix"`
+	Sh *string       `json:"sh"`
+	Pn []string      `json:"pn"`
+	Xx wireExtension `json:"xx"`
+}
+
 type checklistItemCreatePayload struct {
 	Cd float64       `json:"cd"`
 	Md *float64      `json:"md"`

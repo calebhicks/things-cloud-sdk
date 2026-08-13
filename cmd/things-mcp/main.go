@@ -229,6 +229,41 @@ func tools() []toolDefinition {
 			}, []string{"title"}),
 		},
 		{
+			Name:        "create_heading",
+			Title:       "Create Heading",
+			Description: "Create a heading inside a project to group its tasks.",
+			InputSchema: objectSchema(map[string]any{
+				"title":   stringProp("Heading title."),
+				"project": stringProp("Project UUID the heading belongs to."),
+				"dry_run": dryRunProp(),
+			}, []string{"title", "project"}),
+		},
+		{
+			Name:        "create_area",
+			Title:       "Create Area",
+			Description: "Create a Things area.",
+			InputSchema: objectSchema(map[string]any{
+				"title": stringProp("Area title."),
+				"tags": map[string]any{
+					"type":        "array",
+					"description": "Tag UUIDs.",
+					"items":       map[string]any{"type": "string"},
+				},
+				"dry_run": dryRunProp(),
+			}, []string{"title"}),
+		},
+		{
+			Name:        "create_tag",
+			Title:       "Create Tag",
+			Description: "Create a Things tag.",
+			InputSchema: objectSchema(map[string]any{
+				"title":     stringProp("Tag title."),
+				"shorthand": stringProp("Optional one-key shorthand."),
+				"parent":    stringProp("Optional parent tag UUID."),
+				"dry_run":   dryRunProp(),
+			}, []string{"title"}),
+		},
+		{
 			Name:        "complete_task",
 			Title:       "Complete Task",
 			Description: "Mark a Things task as completed.",
@@ -457,6 +492,37 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 			return toolResult{}, err
 		}
 		return s.createProject(args.Title, args.Note, args.Area, args.DryRun)
+	case "create_heading":
+		var args struct {
+			Title   string `json:"title"`
+			Project string `json:"project"`
+			DryRun  bool   `json:"dry_run"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.createHeading(args.Title, args.Project, args.DryRun)
+	case "create_area":
+		var args struct {
+			Title  string   `json:"title"`
+			Tags   []string `json:"tags"`
+			DryRun bool     `json:"dry_run"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.createArea(args.Title, args.Tags, args.DryRun)
+	case "create_tag":
+		var args struct {
+			Title     string `json:"title"`
+			Shorthand string `json:"shorthand"`
+			Parent    string `json:"parent"`
+			DryRun    bool   `json:"dry_run"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.createTag(args.Title, args.Shorthand, args.Parent, args.DryRun)
 	case "complete_task":
 		var args struct {
 			UUID   string `json:"uuid"`
@@ -942,6 +1008,102 @@ func (s *mcpServer) createProject(title, note, area string, dryRun bool) (toolRe
 		return toolError(err), nil
 	}
 	return toolJSON(map[string]string{"status": "created", "uuid": projectUUID, "title": title}), nil
+}
+
+// createHeading uses the CLI's heading-create path: create with
+// --type heading sets tp=2, and the structural rule forces st=1 (a heading
+// with st=0 crashes Things.app). A heading only makes sense inside a
+// project, so the project is required here.
+func (s *mcpServer) createHeading(title, project string, dryRun bool) (toolResult, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return toolResult{}, fmt.Errorf("title is required")
+	}
+	if project == "" {
+		return toolResult{}, fmt.Errorf("project is required")
+	}
+	if err := thingscloud.ValidateUUID(project); err != nil {
+		return toolResult{}, fmt.Errorf("project: %w", err)
+	}
+	headingUUID := thingscloud.NewUUID()
+	payload := newTaskCreatePayload(title, map[string]string{"type": "heading", "project": project})
+	env := writeEnvelope{id: headingUUID, action: 0, kind: "Task6", payload: payload}
+	if dryRun {
+		return toolJSON(map[string]any{"status": "dry-run", "uuid": headingUUID, "item": env}), nil
+	}
+	if err := s.write(env); err != nil {
+		return toolError(err), nil
+	}
+	return toolJSON(map[string]string{"status": "created", "uuid": headingUUID, "title": title}), nil
+}
+
+// createArea mirrors the CLI create-area command's payload exactly:
+// {tt, ix: 0, tg, xx} as an Area3 create.
+func (s *mcpServer) createArea(title string, tags []string, dryRun bool) (toolResult, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return toolResult{}, fmt.Errorf("title is required")
+	}
+	tg := []string{}
+	if len(tags) > 0 {
+		validated, err := validateTagUUIDs(tags)
+		if err != nil {
+			return toolResult{}, err
+		}
+		tg = validated
+	}
+	areaUUID := thingscloud.NewUUID()
+	payload := map[string]any{
+		"tt": title,
+		"ix": 0,
+		"tg": tg,
+		"xx": defaultExtension(),
+	}
+	env := writeEnvelope{id: areaUUID, action: 0, kind: "Area3", payload: payload}
+	if dryRun {
+		return toolJSON(map[string]any{"status": "dry-run", "uuid": areaUUID, "item": env}), nil
+	}
+	if err := s.write(env); err != nil {
+		return toolError(err), nil
+	}
+	return toolJSON(map[string]string{"status": "created", "uuid": areaUUID, "title": title}), nil
+}
+
+// createTag mirrors the CLI create-tag command's payload exactly, including
+// the negative ix ("Things uses negative indices" per the CLI's HAR notes) —
+// the positive-ix rule applies to Task6/ChecklistItem3 creates, not tags.
+func (s *mcpServer) createTag(title, shorthand, parent string, dryRun bool) (toolResult, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return toolResult{}, fmt.Errorf("title is required")
+	}
+	var sh *string
+	if shorthand != "" {
+		sh = &shorthand
+	}
+	pn := []string{}
+	if parent != "" {
+		if err := thingscloud.ValidateUUID(parent); err != nil {
+			return toolResult{}, fmt.Errorf("parent: %w", err)
+		}
+		pn = []string{parent}
+	}
+	tagUUID := thingscloud.NewUUID()
+	payload := tagCreatePayload{
+		Tt: title,
+		Ix: -1237, // Things uses negative indices for tags
+		Sh: sh,
+		Pn: pn,
+		Xx: defaultExtension(),
+	}
+	env := writeEnvelope{id: tagUUID, action: 0, kind: "Tag4", payload: payload}
+	if dryRun {
+		return toolJSON(map[string]any{"status": "dry-run", "uuid": tagUUID, "item": env}), nil
+	}
+	if err := s.write(env); err != nil {
+		return toolError(err), nil
+	}
+	return toolJSON(map[string]string{"status": "created", "uuid": tagUUID, "title": title}), nil
 }
 
 func (s *mcpServer) completeTask(taskUUID string, dryRun bool) (toolResult, error) {
