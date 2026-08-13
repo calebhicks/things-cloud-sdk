@@ -965,10 +965,14 @@ func toolJSON(v any) toolResult {
 	if err != nil {
 		return toolError(err)
 	}
-	return toolResult{
-		Content:           []textContent{{Type: "text", Text: string(bs)}},
-		StructuredContent: v,
+	res := toolResult{Content: []textContent{{Type: "text", Text: string(bs)}}}
+	// The MCP spec requires structuredContent to be a JSON object; strict
+	// clients (e.g. Claude Code) reject array-valued results outright, which
+	// broke every list_* tool. Only attach it for object results.
+	if len(bs) > 0 && bs[0] == '{' {
+		res.StructuredContent = v
 	}
+	return res
 }
 
 func toolError(err error) toolResult {
