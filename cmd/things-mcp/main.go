@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -21,6 +22,7 @@ import (
 
 const protocolVersion = "2025-06-18"
 const serverVersion = "0.2.4"
+const maxBatchOperations = 50
 
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -231,6 +233,34 @@ func tools() []toolDefinition {
 			}, []string{"uuid"}),
 		},
 		{
+			Name:        "batch_tasks",
+			Title:       "Batch Tasks",
+			Description: "Create, edit, complete, or trash up to 50 tasks in one Things Cloud write request.",
+			InputSchema: objectSchema(map[string]any{
+				"operations": map[string]any{
+					"type":        "array",
+					"description": "Batch operations, applied in one write request.",
+					"minItems":    1,
+					"maxItems":    maxBatchOperations,
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"cmd":       enumProp("Operation.", []string{"create", "edit", "complete", "trash"}),
+							"uuid":      stringProp("Task UUID. Optional for create (generated when omitted), required otherwise."),
+							"title":     stringProp("Task title. Required for create."),
+							"note":      stringProp("Task note."),
+							"when":      enumProp("Schedule bucket.", []string{"inbox", "today", "anytime", "someday"}),
+							"scheduled": stringProp("Scheduled date as YYYY-MM-DD."),
+							"deadline":  stringProp("Deadline date as YYYY-MM-DD."),
+						},
+						"required":             []string{"cmd"},
+						"additionalProperties": false,
+					},
+				},
+				"dry_run": dryRunProp(),
+			}, []string{"operations"}),
+		},
+		{
 			Name:        "trash_task",
 			Title:       "Trash Task",
 			Description: "Move a task to trash.",
@@ -387,6 +417,15 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 			return toolResult{}, err
 		}
 		return s.editTask(args.UUID, args.Title, args.Note, args.When, args.DryRun)
+	case "batch_tasks":
+		var args struct {
+			Operations []batchTaskOp `json:"operations"`
+			DryRun     bool          `json:"dry_run"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.batchTasks(args.Operations, args.DryRun)
 	case "trash_task":
 		var args struct {
 			UUID   string `json:"uuid"`
@@ -449,6 +488,20 @@ func decodeArgs(raw json.RawMessage, out any) error {
 		raw = []byte("{}")
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("invalid arguments: %w", err)
+	}
+	return nil
+}
+
+// decodeArgsStrict rejects unknown fields so unsupported batch operation
+// fields fail loudly instead of being silently dropped.
+func decodeArgsStrict(raw json.RawMessage, out any) error {
+	if len(raw) == 0 {
+		raw = []byte("{}")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(out); err != nil {
 		return fmt.Errorf("invalid arguments: %w", err)
 	}
 	return nil
@@ -817,6 +870,62 @@ func (s *mcpServer) writeTaskUpdate(taskUUID string, payload map[string]any, dry
 		return toolError(err), nil
 	}
 	return toolJSON(map[string]string{"status": status, "uuid": taskUUID}), nil
+}
+
+// batchTaskOp is the MCP-facing subset of thingscli.BatchOp. Decoding into
+// this struct (with strict decoding) keeps the tool surface aligned with the
+// documented schema; the CLI batch machinery does the actual envelope work.
+type batchTaskOp struct {
+	Cmd       string `json:"cmd"`
+	UUID      string `json:"uuid"`
+	Title     string `json:"title"`
+	Note      string `json:"note"`
+	When      string `json:"when"`
+	Scheduled string `json:"scheduled"`
+	Deadline  string `json:"deadline"`
+}
+
+func (s *mcpServer) batchTasks(ops []batchTaskOp, dryRun bool) (toolResult, error) {
+	if len(ops) == 0 {
+		return toolResult{}, fmt.Errorf("at least one operation is required")
+	}
+	cliOps := make([]thingscli.BatchOp, 0, len(ops))
+	for i, op := range ops {
+		switch op.Cmd {
+		case "create", "edit", "complete", "trash":
+		default:
+			return toolResult{}, fmt.Errorf("op %d: unsupported cmd: %q", i, op.Cmd)
+		}
+		cliOps = append(cliOps, thingscli.BatchOp{
+			Cmd:       op.Cmd,
+			UUID:      strings.TrimSpace(op.UUID),
+			Title:     op.Title,
+			Note:      op.Note,
+			When:      op.When,
+			Scheduled: op.Scheduled,
+			Deadline:  op.Deadline,
+		})
+	}
+	envelopes, results, err := thingscli.BuildBatch(cliOps, maxBatchOperations)
+	if err != nil {
+		return toolResult{}, err
+	}
+	if dryRun {
+		return toolJSON(map[string]any{
+			"status":     "dry-run",
+			"operations": len(envelopes),
+			"items":      envelopes,
+			"results":    results,
+		}), nil
+	}
+	if err := s.write(envelopes...); err != nil {
+		return toolError(err), nil
+	}
+	return toolJSON(map[string]any{
+		"status":     "ok",
+		"operations": len(envelopes),
+		"results":    results,
+	}), nil
 }
 
 func (s *mcpServer) addChecklist(taskUUID string, titles []string, dryRun bool) (toolResult, error) {

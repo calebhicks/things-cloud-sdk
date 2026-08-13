@@ -252,6 +252,33 @@ Write success shape:
 }
 ```
 
+Batch write shape (`batch_tasks`):
+
+```json
+{
+  "status": "ok",
+  "operations": 2,
+  "results": [
+    {"cmd": "create", "uuid": "string", "title": "string"},
+    {"cmd": "complete", "uuid": "string"}
+  ]
+}
+```
+
+`batch_tasks` rules:
+
+- `operations` accepts 1-50 entries; each entry's `cmd` is one of `create`,
+  `edit`, `complete`, or `trash`.
+- Supported operation fields are `uuid`, `title`, `note`, `when`, `scheduled`,
+  and `deadline`, with the same semantics as the CLI `batch` command.
+  Unsupported fields are rejected, not ignored.
+- `uuid` is optional for `create` (the server generates a Things-compatible
+  Base58 UUID) and required for `edit`, `complete`, and `trash`.
+- Duplicate `uuid` values within one batch are rejected before writing.
+- All operations are sent to Things Cloud in a single write request.
+- With `dry_run`, the result uses `"status": "dry-run"` and adds an `items`
+  array containing the wire envelopes.
+
 ## Stability Notes
 
 - The simple task list shape is the preferred stable contract for agents.

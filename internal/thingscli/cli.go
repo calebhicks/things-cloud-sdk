@@ -1766,17 +1766,9 @@ func cmdBatch(history *thingscloud.History, dryRun bool) {
 		fatalf("batch: no operations provided")
 	}
 
-	// Build all envelopes
-	var envelopes []thingscloud.Identifiable
-	var results []map[string]string
-
-	for i, op := range ops {
-		env, result, err := buildBatchEnvelope(op)
-		if err != nil {
-			fatalf("batch op %d (%s): %v", i, op.Cmd, err)
-		}
-		envelopes = append(envelopes, env)
-		results = append(results, result)
+	envelopes, results, err := BuildBatch(ops, 0)
+	if err != nil {
+		fatalf("batch: %v", err)
 	}
 
 	// Send all in one request
@@ -1799,6 +1791,38 @@ func cmdBatch(history *thingscloud.History, dryRun bool) {
 		"operations": len(envelopes),
 		"results":    results,
 	})
+}
+
+// BuildBatch validates batch operations and converts them into Things Cloud
+// write envelopes ready to pass to History.Write in one request. A maxOps of
+// 0 means unlimited. Duplicate envelope UUIDs are rejected because
+// History.Write serializes the batch as a JSON map keyed by UUID, which would
+// silently drop all but one of the duplicate entries.
+func BuildBatch(ops []BatchOp, maxOps int) ([]thingscloud.Identifiable, []map[string]string, error) {
+	if len(ops) == 0 {
+		return nil, nil, fmt.Errorf("no operations provided")
+	}
+	if maxOps > 0 && len(ops) > maxOps {
+		return nil, nil, fmt.Errorf("too many operations: %d > %d", len(ops), maxOps)
+	}
+
+	envelopes := make([]thingscloud.Identifiable, 0, len(ops))
+	results := make([]map[string]string, 0, len(ops))
+	seen := map[string]struct{}{}
+	for i, op := range ops {
+		env, result, err := buildBatchEnvelope(op)
+		if err != nil {
+			return nil, nil, fmt.Errorf("op %d (%s): %w", i, op.Cmd, err)
+		}
+		id := env.UUID()
+		if _, ok := seen[id]; ok {
+			return nil, nil, fmt.Errorf("duplicate uuid in batch: %s", id)
+		}
+		seen[id] = struct{}{}
+		envelopes = append(envelopes, env)
+		results = append(results, result)
+	}
+	return envelopes, results, nil
 }
 
 func buildBatchEnvelope(op BatchOp) (thingscloud.Identifiable, map[string]string, error) {

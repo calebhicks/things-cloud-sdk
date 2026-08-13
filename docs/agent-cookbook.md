@@ -235,6 +235,8 @@ Core MCP tools:
 - `create_task`
 - `complete_task`
 - `edit_task`
+- `batch_tasks` (up to 50 create/edit/complete/trash operations in one write,
+  same field semantics as the CLI `batch` command)
 - `trash_task`
 - `move_task_to_today`
 - `add_checklist`

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	thingscloud "github.com/pdurlej/things-cloud-sdk"
 )
 
 // setHermeticConfig points the server at a throwaway config file and clears
@@ -181,6 +183,7 @@ func TestToolsListIncludesCoreTools(t *testing.T) {
 		"create_task",
 		"complete_task",
 		"edit_task",
+		"batch_tasks",
 		"trash_task",
 		"move_task_to_today",
 		"add_checklist",
@@ -275,6 +278,112 @@ func TestEditTaskDryRunDoesNotRequireCloud(t *testing.T) {
 	}
 	if payload.Item.E != "Task6" || payload.Item.P.Title != "New title" || payload.Item.P.St != 1 {
 		t.Fatalf("item payload = %#v, want Task6 title and anytime schedule", payload.Item)
+	}
+}
+
+func TestBatchTasksDryRunDoesNotRequireCloud(t *testing.T) {
+	server := &mcpServer{}
+	result, err := server.batchTasks([]batchTaskOp{
+		{Cmd: "create", Title: "Task one", When: "today"},
+		{Cmd: "complete", UUID: "task-1"},
+	}, true)
+	if err != nil {
+		t.Fatalf("batchTasks dry-run failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("dry-run returned tool error: %#v", result)
+	}
+	var payload struct {
+		Status     string `json:"status"`
+		Operations int    `json:"operations"`
+		Items      []struct {
+			T int    `json:"t"`
+			E string `json:"e"`
+		} `json:"items"`
+		Results []map[string]string `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content failed: %v", err)
+	}
+	if payload.Status != "dry-run" || payload.Operations != 2 {
+		t.Fatalf("payload = %#v, want dry-run with 2 operations", payload)
+	}
+	if len(payload.Items) != 2 || payload.Items[0].E != "Task6" || payload.Items[0].T != 0 || payload.Items[1].T != 1 {
+		t.Fatalf("items = %#v, want a Task6 create and an update", payload.Items)
+	}
+	if len(payload.Results) != 2 || payload.Results[0]["uuid"] == "" || payload.Results[1]["uuid"] != "task-1" {
+		t.Fatalf("results = %#v, want generated create uuid and task-1", payload.Results)
+	}
+}
+
+func TestBatchTasksWritesOneCommit(t *testing.T) {
+	var commits int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/history/history-id/items":
+			fmt.Fprint(w, `{"items":[],"current-item-index":3,"schema":301}`)
+		case "/version/1/history/history-id/commit":
+			commits++
+			if got := r.URL.Query().Get("ancestor-index"); got != "3" {
+				t.Errorf("ancestor-index = %s, want 3", got)
+			}
+			var body map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode commit body: %v", err)
+			}
+			if len(body) != 2 {
+				t.Errorf("commit body has %d entries, want 2", len(body))
+			}
+			fmt.Fprint(w, `{"server-head-index":5}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := thingscloud.New(ts.URL, "test@example.com", "secret")
+	server := &mcpServer{client: client, history: client.HistoryWithID("history-id")}
+
+	result, err := server.batchTasks([]batchTaskOp{
+		{Cmd: "create", Title: "Task one", When: "anytime"},
+		{Cmd: "trash", UUID: "task-9"},
+	}, false)
+	if err != nil {
+		t.Fatalf("batchTasks failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("batchTasks returned tool error: %#v", result)
+	}
+	if commits != 1 {
+		t.Fatalf("commits = %d, want 1", commits)
+	}
+	var payload struct {
+		Status     string              `json:"status"`
+		Operations int                 `json:"operations"`
+		Results    []map[string]string `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal content failed: %v", err)
+	}
+	if payload.Status != "ok" || payload.Operations != 2 || len(payload.Results) != 2 {
+		t.Fatalf("payload = %#v, want ok with 2 operations", payload)
+	}
+}
+
+func TestBatchTasksRejectsUnsupportedCmdAndUnknownFields(t *testing.T) {
+	server := &mcpServer{}
+	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "purge", UUID: "task-1"}}, true); err == nil {
+		t.Fatal("purge cmd should be rejected")
+	}
+	if _, err := server.batchTasks(nil, true); err == nil {
+		t.Fatal("empty operations should be rejected")
+	}
+
+	// Unsupported operation fields must fail loudly, not silently drop.
+	_, err := server.callTool(json.RawMessage(`{"name":"batch_tasks","arguments":{"operations":[{"cmd":"create","title":"X","project":"p-1"}],"dry_run":true}}`))
+	if err == nil {
+		t.Fatal("unknown operation field should be rejected")
 	}
 }
 

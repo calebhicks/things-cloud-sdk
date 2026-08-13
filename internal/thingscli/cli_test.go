@@ -105,6 +105,51 @@ func TestLoadStateWithCacheResetsWhenCursorAheadOfServer(t *testing.T) {
 	}
 }
 
+func TestBuildBatchValidatesOperations(t *testing.T) {
+	if _, _, err := BuildBatch(nil, 50); err == nil {
+		t.Fatal("empty batch should be rejected")
+	}
+
+	tooMany := make([]BatchOp, 3)
+	for i := range tooMany {
+		tooMany[i] = BatchOp{Cmd: "complete", UUID: fmt.Sprintf("task-%d", i)}
+	}
+	if _, _, err := BuildBatch(tooMany, 2); err == nil {
+		t.Fatal("batch above maxOps should be rejected")
+	}
+
+	if _, _, err := BuildBatch([]BatchOp{
+		{Cmd: "complete", UUID: "task-1"},
+		{Cmd: "trash", UUID: "task-1"},
+	}, 50); err == nil {
+		t.Fatal("duplicate uuids in one batch should be rejected")
+	}
+
+	if _, _, err := BuildBatch([]BatchOp{{Cmd: "explode", UUID: "task-1"}}, 50); err == nil {
+		t.Fatal("unknown cmd should be rejected")
+	}
+
+	envelopes, results, err := BuildBatch([]BatchOp{
+		{Cmd: "create", Title: "Task one"},
+		{Cmd: "complete", UUID: "task-2"},
+	}, 50)
+	if err != nil {
+		t.Fatalf("valid batch failed: %v", err)
+	}
+	if len(envelopes) != 2 || len(results) != 2 {
+		t.Fatalf("envelopes/results = %d/%d, want 2/2", len(envelopes), len(results))
+	}
+	if envelopes[0].UUID() == "" {
+		t.Fatal("create without uuid should get a generated uuid")
+	}
+	if results[0]["uuid"] != envelopes[0].UUID() {
+		t.Fatalf("result uuid %q != envelope uuid %q", results[0]["uuid"], envelopes[0].UUID())
+	}
+	if envelopes[1].UUID() != "task-2" {
+		t.Fatalf("complete envelope uuid = %q, want task-2", envelopes[1].UUID())
+	}
+}
+
 func TestSaveCLIStateCacheIsAtomicAndPrivate(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "state.json")
