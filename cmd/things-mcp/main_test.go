@@ -448,6 +448,80 @@ func TestBatchTasksCommitsSequentially(t *testing.T) {
 	}
 }
 
+func TestWriteRetriesOnceOnCommitConflict(t *testing.T) {
+	var commits, syncs int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/history/history-id/items":
+			syncs++
+			fmt.Fprint(w, `{"items":[],"current-item-index":7,"schema":301}`)
+		case "/version/1/history/history-id/commit":
+			commits++
+			if commits == 1 {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			// The retry must carry the re-synced ancestor-index.
+			if got := r.URL.Query().Get("ancestor-index"); got != "7" {
+				t.Errorf("retry ancestor-index = %s, want 7", got)
+			}
+			fmt.Fprint(w, `{"server-head-index":8}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := thingscloud.New(ts.URL, "test@example.com", "secret")
+	server := &mcpServer{client: client, history: client.HistoryWithID("history-id")}
+
+	result, err := server.createTask("Conflicted", "", "anytime", false)
+	if err != nil {
+		t.Fatalf("createTask failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("createTask returned tool error after conflict retry: %#v", result)
+	}
+	if commits != 2 {
+		t.Fatalf("commits = %d, want 2 (original + one retry)", commits)
+	}
+	if syncs != 2 {
+		t.Fatalf("syncs = %d, want 2 (initial + re-sync before retry)", syncs)
+	}
+}
+
+func TestWriteDoesNotRetryConflictTwice(t *testing.T) {
+	var commits int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version/1/history/history-id/items":
+			fmt.Fprint(w, `{"items":[],"current-item-index":7,"schema":301}`)
+		case "/version/1/history/history-id/commit":
+			commits++
+			w.WriteHeader(http.StatusConflict)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := thingscloud.New(ts.URL, "test@example.com", "secret")
+	server := &mcpServer{client: client, history: client.HistoryWithID("history-id")}
+
+	result, err := server.createTask("Still conflicted", "", "anytime", false)
+	if err != nil {
+		t.Fatalf("createTask failed: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("persistent conflict should surface a tool error, got %#v", result)
+	}
+	if commits != 2 {
+		t.Fatalf("commits = %d, want exactly 2 (no second retry)", commits)
+	}
+}
+
 func TestBatchTasksRejectsUnsupportedCmdAndUnknownFields(t *testing.T) {
 	server := &mcpServer{}
 	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "purge", UUID: thingscloud.NewUUID()}}, true); err == nil {

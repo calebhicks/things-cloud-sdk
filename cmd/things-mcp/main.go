@@ -936,11 +936,28 @@ func (s *mcpServer) write(items ...thingscloud.Identifiable) error {
 	// LatestServerIndex from the server response, so commits chain on the
 	// correct ancestor-index without re-syncing between items.
 	for i, item := range items {
-		if err := s.history.Write(item); err != nil {
+		err := s.history.Write(item)
+		if err != nil && isCommitConflict(err) {
+			// 409: another writer advanced the history between our Sync and
+			// this commit. Re-sync for a fresh ancestor-index and retry this
+			// item exactly once; any other failure returns immediately.
+			if syncErr := s.history.Sync(); syncErr != nil {
+				return fmt.Errorf("re-sync after conflict on item %d/%d (%s): %w", i+1, len(items), item.UUID(), syncErr)
+			}
+			err = s.history.Write(item)
+		}
+		if err != nil {
 			return fmt.Errorf("write item %d/%d (%s): %w", i+1, len(items), item.UUID(), err)
 		}
 	}
 	return nil
+}
+
+// isCommitConflict reports whether err is History.Write's HTTP 409 error.
+// The core returns fmt.Errorf("Write failed: %d", status) with no typed
+// error, so this matches the formatted message.
+func isCommitConflict(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Write failed: 409")
 }
 
 func toolJSON(v any) toolResult {
