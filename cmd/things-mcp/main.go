@@ -202,6 +202,17 @@ func tools() []toolDefinition {
 			}, []string{"title"}),
 		},
 		{
+			Name:        "create_project",
+			Title:       "Create Project",
+			Description: "Create a Things project, optionally inside an area.",
+			InputSchema: objectSchema(map[string]any{
+				"title":   stringProp("Project title."),
+				"note":    stringProp("Optional project note."),
+				"area":    stringProp("Area UUID to create the project in."),
+				"dry_run": dryRunProp(),
+			}, []string{"title"}),
+		},
+		{
 			Name:        "complete_task",
 			Title:       "Complete Task",
 			Description: "Mark a Things task as completed.",
@@ -415,6 +426,17 @@ func (s *mcpServer) callTool(raw json.RawMessage) (toolResult, error) {
 			return toolResult{}, err
 		}
 		return s.createTask(args.Title, args.Note, args.When, args.DryRun)
+	case "create_project":
+		var args struct {
+			Title  string `json:"title"`
+			Note   string `json:"note"`
+			Area   string `json:"area"`
+			DryRun bool   `json:"dry_run"`
+		}
+		if err := decodeArgsStrict(params.Arguments, &args); err != nil {
+			return toolResult{}, err
+		}
+		return s.createProject(args.Title, args.Note, args.Area, args.DryRun)
 	case "complete_task":
 		var args struct {
 			UUID   string `json:"uuid"`
@@ -808,6 +830,37 @@ func (s *mcpServer) createTask(title, note, when string, dryRun bool) (toolResul
 		return toolError(err), nil
 	}
 	return toolJSON(map[string]string{"status": "created", "uuid": taskUUID, "title": title}), nil
+}
+
+// createProject uses the CLI's existing project-create path: create with
+// --type project sets tp=1 in newTaskCreatePayload, whose structural rule
+// forces st=1 (projects are never inbox; st=0 on structural items crashes
+// Things.app). Area and note follow the same builder options as CLI create.
+func (s *mcpServer) createProject(title, note, area string, dryRun bool) (toolResult, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return toolResult{}, fmt.Errorf("title is required")
+	}
+	opts := map[string]string{"type": "project"}
+	if note != "" {
+		opts["note"] = note
+	}
+	if area != "" {
+		if err := thingscloud.ValidateUUID(area); err != nil {
+			return toolResult{}, fmt.Errorf("area: %w", err)
+		}
+		opts["area"] = area
+	}
+	projectUUID := thingscloud.NewUUID()
+	payload := newTaskCreatePayload(title, opts)
+	env := writeEnvelope{id: projectUUID, action: 0, kind: "Task6", payload: payload}
+	if dryRun {
+		return toolJSON(map[string]any{"status": "dry-run", "uuid": projectUUID, "item": env}), nil
+	}
+	if err := s.write(env); err != nil {
+		return toolError(err), nil
+	}
+	return toolJSON(map[string]string{"status": "created", "uuid": projectUUID, "title": title}), nil
 }
 
 func (s *mcpServer) completeTask(taskUUID string, dryRun bool) (toolResult, error) {

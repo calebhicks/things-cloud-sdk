@@ -175,6 +175,7 @@ func TestToolsListIncludesCoreTools(t *testing.T) {
 		"list_tasks",
 		"search_tasks",
 		"create_task",
+		"create_project",
 		"complete_task",
 		"edit_task",
 		"batch_tasks",
@@ -301,6 +302,76 @@ func TestWriteToolsRejectNonCanonicalUUID(t *testing.T) {
 	}
 	if _, err := server.batchTasks([]batchTaskOp{{Cmd: "create", Title: "X", UUID: "task-1"}}, true); err == nil {
 		t.Fatal("batch create with non-canonical caller uuid should be rejected")
+	}
+}
+
+func TestCreateProjectDryRunFollowsCLIConventions(t *testing.T) {
+	server := &mcpServer{}
+	areaUUID := thingscloud.NewUUID()
+
+	result, err := server.createProject("New project", "a note", areaUUID, true)
+	if err != nil {
+		t.Fatalf("createProject dry-run failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("dry-run returned tool error: %#v", result)
+	}
+	var payload struct {
+		Status string `json:"status"`
+		UUID   string `json:"uuid"`
+		Item   struct {
+			T int    `json:"t"`
+			E string `json:"e"`
+			P struct {
+				Tp int             `json:"tp"`
+				St int             `json:"st"`
+				Ar []string        `json:"ar"`
+				Tt string          `json:"tt"`
+				Md json.RawMessage `json:"md"`
+				Nt struct {
+					Value string `json:"v"`
+				} `json:"nt"`
+			} `json:"p"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal dry-run content: %v", err)
+	}
+	if payload.Status != "dry-run" {
+		t.Fatalf("status = %q, want dry-run", payload.Status)
+	}
+	if err := thingscloud.ValidateUUID(payload.UUID); err != nil {
+		t.Fatalf("generated project uuid %q is not canonical: %v", payload.UUID, err)
+	}
+	if payload.Item.T != 0 || payload.Item.E != "Task6" {
+		t.Fatalf("item = %#v, want Task6 create", payload.Item)
+	}
+	// CLI create --type project: tp=1, and the structural rule forces st=1
+	// (a structural item with st=0 crashes Things.app).
+	if payload.Item.P.Tp != 1 {
+		t.Fatalf("tp = %d, want 1 (project)", payload.Item.P.Tp)
+	}
+	if payload.Item.P.St != 1 {
+		t.Fatalf("st = %d, want 1 (structural, never inbox)", payload.Item.P.St)
+	}
+	if len(payload.Item.P.Ar) != 1 || payload.Item.P.Ar[0] != areaUUID {
+		t.Fatalf("ar = %v, want [%s]", payload.Item.P.Ar, areaUUID)
+	}
+	if payload.Item.P.Tt != "New project" || payload.Item.P.Nt.Value != "a note" {
+		t.Fatalf("title/note = %q/%q, want New project/a note", payload.Item.P.Tt, payload.Item.P.Nt.Value)
+	}
+	if string(payload.Item.P.Md) != "null" {
+		t.Fatalf("md = %s, want null on creates", payload.Item.P.Md)
+	}
+
+	if _, err := server.createProject("", "", "", true); err == nil {
+		t.Fatal("empty title should be rejected")
+	}
+	if _, err := server.createProject("P", "", "not-an-area", true); err == nil {
+		t.Fatal("non-canonical area uuid should be rejected")
+	}
+	if _, err := server.callTool(json.RawMessage(`{"name":"create_project","arguments":{"title":"P","heading":"x","dry_run":true}}`)); err == nil {
+		t.Fatal("unknown create_project field should be rejected")
 	}
 }
 
